@@ -1,0 +1,27 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "task-steering"
+version = "0.1.0"
+description = "Implicit state machine middleware for LangChain v1 agents. Ordered task pipelines with per-task tool scoping, prompt injection, and composable validation."
+readme = "README.md"
+license = "MIT"
+requires-python = ">=3.10"
+dependencies = [
+    "langchain>=1.0.0",
+    "langgraph>=0.4.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0",
+    "pytest-cov",
+]
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/task_steering"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
