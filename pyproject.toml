@@ -9,10 +9,29 @@ description = "Implicit state machine middleware for LangChain v1 agents. Ordere
 readme = "README.md"
 license = "MIT"
 requires-python = ">=3.10"
+authors = [
+    { name = "Edvin Hallvaxhiu" },
+]
+keywords = ["langchain", "langgraph", "agents", "middleware", "state-machine", "task-pipeline"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Software Development :: Libraries",
+]
 dependencies = [
     "langchain>=1.0.0",
     "langgraph>=0.4.0",
 ]
+
+[project.urls]
+Homepage = "https://github.com/edvinhallvaxhiu/task-steering"
+Repository = "https://github.com/edvinhallvaxhiu/task-steering"
+Issues = "https://github.com/edvinhallvaxhiu/task-steering/issues"
 
 [project.optional-dependencies]
 dev = [
