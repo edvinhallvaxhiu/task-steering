@@ -28,7 +28,7 @@ The model drives its own transitions by calling `update_task_status`. The middle
 Clone the repository and install in editable mode:
 
 ```bash
-git clone https://github.com/YOUR_USERNAME/task-steering.git
+git clone https://github.com/edvinhallvaxhiu/task-steering
 cd task-steering
 pip install -e ".[dev]"
 ```
