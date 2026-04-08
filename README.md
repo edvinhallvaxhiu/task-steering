@@ -26,7 +26,7 @@ The model drives its own transitions by calling `update_task_status`. The middle
 ## Install
 
 ```bash
-pip install task-steering
+pip install langchain-task-steering
 ```
 
 For development:
