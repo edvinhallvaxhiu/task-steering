@@ -73,7 +73,7 @@ jobs:
         run: |
           VERSION=$(node -p "require('./package.json').version")
           echo "version=$VERSION" >> "$GITHUB_OUTPUT"
-          if npm view @ehallvaxhiu/langchain-task-steering@"$VERSION" version 2>/dev/null; then
+          if npm view langchain-task-steering@"$VERSION" version 2>/dev/null; then
             echo "exists=true" >> "$GITHUB_OUTPUT"
             echo "TypeScript $VERSION already on npm — skipping"
           else
