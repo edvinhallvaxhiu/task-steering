@@ -1,5 +1,5 @@
 {
-  "name": "@ehallvaxhiu/langchain-task-steering",
+  "name": "langchain-task-steering",
   "version": "0.1.2",
   "description": "Implicit state machine middleware for LangChain.js agents. Ordered task pipelines with per-task tool scoping, prompt injection, and composable validation.",
   "main": "./dist/index.js",
