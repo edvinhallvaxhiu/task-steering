@@ -253,6 +253,91 @@ class ThreatsMiddleware extends TaskMiddleware {
 | `onComplete(state)` | After successful `complete` transition | Side effects (trail capture, cleanup) |
 | `wrapToolCall(request, handler)` | On every tool call during this task | Mid-task tool gating / modification |
 | `wrapModelCall(request, handler)` | On every model call during this task | Extra prompt injection / request modification |
+| `tools` *(property)* | At middleware construction | Extra tools to register and scope to this task |
+
+## Using community middleware at task scope
+
+Standard `AgentMiddleware` instances can be passed directly to a task — they're auto-wrapped in `AgentMiddlewareAdapter`. No import needed:
+
+### Python
+
+```python
+from langchain.agents.middleware import SummarizationMiddleware
+from langchain_task_steering import Task, TaskSteeringMiddleware
+
+pipeline = TaskSteeringMiddleware(
+    tasks=[
+        Task(
+            name="research",
+            instruction="Research the topic thoroughly.",
+            tools=[search_tool],
+            middleware=SummarizationMiddleware(),  # auto-wrapped
+        ),
+        Task(
+            name="write",
+            instruction="Write the final report.",
+            tools=[write_tool],
+        ),
+    ],
+)
+```
+
+### TypeScript
+
+```typescript
+import { TaskSteeringMiddleware } from "langchain-task-steering";
+
+const pipeline = new TaskSteeringMiddleware({
+  tasks: [
+    {
+      name: "research",
+      instruction: "Research the topic thoroughly.",
+      tools: [searchTool],
+      middleware: summarizationMiddleware, // auto-wrapped
+    },
+  ],
+});
+```
+
+The adapter forwards `wrapModelCall`, `wrapToolCall`, `tools`, and `state_schema` from the inner middleware. Agent-level hooks (`beforeAgent`, `afterAgent`) are not forwarded — use `onStart` / `onComplete` for task lifecycle events. Invalid middleware objects are warned and skipped.
+
+## Middleware composition
+
+Tasks accept a list of middleware, composed like LangChain's `create_agent(middleware=[...])`:
+
+```python
+from langchain.agents.middleware import SummarizationMiddleware
+from langchain_task_steering import Task
+
+Task(
+    name="research",
+    instruction="Research the topic thoroughly.",
+    tools=[search_tool],
+    middleware=[
+        SummarizationMiddleware(),   # auto-wrapped, outermost hook wrapper
+        ResearchValidator(),         # TaskMiddleware with validate_completion
+    ],
+)
+```
+
+```typescript
+{
+  name: "research",
+  instruction: "Research the topic thoroughly.",
+  tools: [searchTool],
+  middleware: [summarizationMw, new ResearchValidator()],
+}
+```
+
+Composition semantics:
+- **Wrap-style hooks** (`wrapModelCall`, `wrapToolCall`): first = outermost wrapper.
+- **`validateCompletion`**: all validators run; first error wins.
+- **`onStart` / `onComplete`**: all fire in order.
+- **`tools`**: merged from all middleware, deduplicated.
+
+## Async support
+
+All middleware hooks have async counterparts (`awrap_model_call`, `awrap_tool_call`, `abefore_agent`, `aafter_agent` in Python). Agents using `astream()` or `ainvoke()` are fully supported. The `AgentMiddlewareAdapter` also forwards async hooks from the inner middleware.
 
 ## Configuration
 
@@ -271,7 +356,7 @@ class ThreatsMiddleware extends TaskMiddleware {
 | `name` | yes | Unique identifier (used in prompts and state). |
 | `instruction` | yes | Injected into system prompt when this task is active. |
 | `tools` | yes | Tools visible when this task is `IN_PROGRESS`. |
-| `middleware` | no | Scoped `TaskMiddleware` — only active during this task. |
+| `middleware` | no | Scoped middleware — a `TaskMiddleware`, `AgentMiddleware` (auto-wrapped), or a list of them. Only active during this task. |
 
 ## Development
 
@@ -302,7 +387,9 @@ langchain-task-steering/
       src/langchain_task_steering/
         __init__.py          # Public exports
         types.py             # Task, TaskMiddleware, TaskStatus, TaskSteeringState
-        middleware.py         # TaskSteeringMiddleware implementation
+        middleware.py        # TaskSteeringMiddleware + composition
+        adapter.py           # AgentMiddlewareAdapter
+        _hooks.py            # Dynamic hook discovery from AgentMiddleware
       tests/
         conftest.py          # Fixtures and mock objects
         test_middleware.py    # Test suite
@@ -313,7 +400,8 @@ langchain-task-steering/
       src/
         index.ts             # Public exports
         types.ts             # Task, TaskMiddleware, TaskStatus, interfaces
-        middleware.ts         # TaskSteeringMiddleware implementation
+        middleware.ts        # TaskSteeringMiddleware implementation
+        adapter.ts           # AgentMiddlewareAdapter
       tests/
         middleware.test.ts   # Test suite
       examples/

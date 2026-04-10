@@ -120,9 +120,17 @@ export class TaskMiddleware {
 /**
  * A single task in an ordered pipeline.
  */
+/**
+ * Anything with optional wrapModelCall/wrapToolCall that can serve as middleware.
+ * Raw agent-level middleware objects are auto-wrapped in AgentMiddlewareAdapter.
+ */
+export type TaskMiddlewareInput =
+  | TaskMiddleware
+  | { wrapModelCall?: unknown; wrapToolCall?: unknown; tools?: ToolLike[] }
+
 export interface Task {
   name: string
   instruction: string
   tools: ToolLike[]
-  middleware?: TaskMiddleware
+  middleware?: TaskMiddlewareInput | TaskMiddlewareInput[]
 }

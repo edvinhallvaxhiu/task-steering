@@ -1334,3 +1334,385 @@ describe('Scenario', () => {
     expect((result as ToolMessageResult).content).toContain("Cannot complete 'review'")
   })
 })
+
+// ════════════════════════════════════════════════════════════
+// Null system message
+// ════════════════════════════════════════════════════════════
+
+describe('wrapModelCall — null system message', () => {
+  it('should not crash when systemMessage is null', () => {
+    const tasks: Task[] = [{ name: 'a', instruction: 'A', tools: [toolA] }]
+    const mw = new TaskSteeringMiddleware({ tasks })
+
+    const request = mockModelRequest({
+      state: { taskStatuses: { a: 'in_progress' } },
+      systemMessage: null as unknown as SystemMessageLike,
+      tools: mw.tools,
+    })
+
+    let captured: ModelRequest | null = null
+    mw.wrapModelCall(request, (r) => {
+      captured = r
+      return {}
+    })
+
+    const blocks = getContentBlocks(captured!.systemMessage)
+    const text = blocks.map((b) => b.text ?? '').join('\n')
+    expect(text).toContain('<task_pipeline>')
+    expect(text).toContain('[>] a (in_progress)')
+  })
+})
+
+// ════════════════════════════════════════════════════════════
+// Lifecycle hooks — post-transition state
+// ════════════════════════════════════════════════════════════
+
+describe('lifecycle hooks — post-transition state', () => {
+  it('onStart sees updated taskStatuses', () => {
+    let receivedStatuses: Record<string, string> = {}
+
+    class StateSpy extends TaskMiddleware {
+      onStart(state: Record<string, unknown>): void {
+        receivedStatuses = { ...(state.taskStatuses as Record<string, string>) }
+      }
+    }
+
+    const spy = new StateSpy()
+    const tasks: Task[] = [{ name: 'a', instruction: 'A', tools: [], middleware: spy }]
+    const mw = new TaskSteeringMiddleware({ tasks })
+
+    const request = mockToolCallRequest({
+      toolCall: {
+        name: 'update_task_status',
+        args: { task: 'a', status: 'in_progress' },
+        id: 'call-1',
+      },
+      state: { taskStatuses: { a: 'pending' } },
+    })
+
+    const handler: ToolCallHandler = () => ({ update: { taskStatuses: { a: 'in_progress' } } })
+    mw.wrapToolCall(request, handler)
+
+    expect(receivedStatuses.a).toBe('in_progress')
+  })
+
+  it('onComplete sees updated taskStatuses', () => {
+    let receivedStatuses: Record<string, string> = {}
+
+    class StateSpy extends TaskMiddleware {
+      onComplete(state: Record<string, unknown>): void {
+        receivedStatuses = { ...(state.taskStatuses as Record<string, string>) }
+      }
+    }
+
+    const spy = new StateSpy()
+    const tasks: Task[] = [{ name: 'a', instruction: 'A', tools: [], middleware: spy }]
+    const mw = new TaskSteeringMiddleware({ tasks })
+
+    const request = mockToolCallRequest({
+      toolCall: {
+        name: 'update_task_status',
+        args: { task: 'a', status: 'complete' },
+        id: 'call-1',
+      },
+      state: { taskStatuses: { a: 'in_progress' } },
+    })
+
+    const handler: ToolCallHandler = () => ({ update: { taskStatuses: { a: 'complete' } } })
+    mw.wrapToolCall(request, handler)
+
+    expect(receivedStatuses.a).toBe('complete')
+  })
+})
+
+// ════════════════════════════════════════════════════════════
+// Middleware list composition
+// ════════════════════════════════════════════════════════════
+
+describe('middleware list composition', () => {
+  it('single-item list is unwrapped', () => {
+    const spy = new TaskMiddleware()
+    const tasks: Task[] = [{ name: 'a', instruction: 'A', tools: [], middleware: [spy] }]
+    const mw = new TaskSteeringMiddleware({ tasks })
+    // Should be the same instance, not a composed wrapper
+    expect((mw as any)._taskMap.get('a').middleware).toBe(spy)
+  })
+
+  it('empty list becomes undefined', () => {
+    const tasks: Task[] = [{ name: 'a', instruction: 'A', tools: [], middleware: [] }]
+    const mw = new TaskSteeringMiddleware({ tasks })
+    expect((mw as any)._taskMap.get('a').middleware).toBeUndefined()
+  })
+
+  it('wrapModelCall chains in order (first = outermost)', () => {
+    const callOrder: string[] = []
+
+    class Outer extends TaskMiddleware {
+      wrapModelCall(request: ModelRequest, handler: ModelCallHandler) {
+        callOrder.push('outer')
+        return handler(request)
+      }
+    }
+
+    class Inner extends TaskMiddleware {
+      wrapModelCall(request: ModelRequest, handler: ModelCallHandler) {
+        callOrder.push('inner')
+        return handler(request)
+      }
+    }
+
+    const tasks: Task[] = [
+      { name: 'a', instruction: 'A', tools: [toolA], middleware: [new Outer(), new Inner()] },
+    ]
+    const mw = new TaskSteeringMiddleware({ tasks })
+
+    const request = mockModelRequest({
+      state: { taskStatuses: { a: 'in_progress' } },
+      systemMessage: { content: 'Base' },
+      tools: mw.tools,
+    })
+    mw.wrapModelCall(request, () => ({}))
+
+    expect(callOrder).toEqual(['outer', 'inner'])
+  })
+
+  it('wrapToolCall chains in order', () => {
+    const callOrder: string[] = []
+
+    class Outer extends TaskMiddleware {
+      wrapToolCall(request: ToolCallRequest, handler: ToolCallHandler) {
+        callOrder.push('outer')
+        return handler(request)
+      }
+    }
+
+    class Inner extends TaskMiddleware {
+      wrapToolCall(request: ToolCallRequest, handler: ToolCallHandler) {
+        callOrder.push('inner')
+        return handler(request)
+      }
+    }
+
+    const tasks: Task[] = [
+      { name: 'a', instruction: 'A', tools: [toolA], middleware: [new Outer(), new Inner()] },
+    ]
+    const mw = new TaskSteeringMiddleware({ tasks })
+
+    const request = mockToolCallRequest({
+      toolCall: { name: 'tool_a', args: {}, id: 'call-1' },
+      state: { taskStatuses: { a: 'in_progress' } },
+    })
+    mw.wrapToolCall(request, () => ({ content: 'ok', toolCallId: 'call-1' }))
+
+    expect(callOrder).toEqual(['outer', 'inner'])
+  })
+
+  it('validateCompletion — first error wins', () => {
+    class Fail1 extends TaskMiddleware {
+      validateCompletion() {
+        return 'error from first'
+      }
+    }
+
+    class Fail2 extends TaskMiddleware {
+      validateCompletion() {
+        return 'error from second'
+      }
+    }
+
+    const tasks: Task[] = [
+      { name: 'a', instruction: 'A', tools: [], middleware: [new Fail1(), new Fail2()] },
+    ]
+    const mw = new TaskSteeringMiddleware({ tasks })
+
+    const request = mockToolCallRequest({
+      toolCall: {
+        name: 'update_task_status',
+        args: { task: 'a', status: 'complete' },
+        id: 'call-1',
+      },
+      state: { taskStatuses: { a: 'in_progress' } },
+    })
+    const result = mw.wrapToolCall(request, vi.fn())
+    expect((result as ToolMessageResult).content).toContain('error from first')
+  })
+
+  it('lifecycle hooks all fire', () => {
+    const started: string[] = []
+
+    class Hook1 extends TaskMiddleware {
+      onStart() {
+        started.push('hook1')
+      }
+    }
+
+    class Hook2 extends TaskMiddleware {
+      onStart() {
+        started.push('hook2')
+      }
+    }
+
+    const tasks: Task[] = [
+      { name: 'a', instruction: 'A', tools: [], middleware: [new Hook1(), new Hook2()] },
+    ]
+    const mw = new TaskSteeringMiddleware({ tasks })
+
+    const request = mockToolCallRequest({
+      toolCall: {
+        name: 'update_task_status',
+        args: { task: 'a', status: 'in_progress' },
+        id: 'call-1',
+      },
+      state: { taskStatuses: { a: 'pending' } },
+    })
+    const handler: ToolCallHandler = () => ({ update: { taskStatuses: { a: 'in_progress' } } })
+    mw.wrapToolCall(request, handler)
+
+    expect(started).toEqual(['hook1', 'hook2'])
+  })
+
+  it('tools merged from all middlewares', () => {
+    const extraTool: ToolLike = { name: 'extra_tool', description: 'Extra' }
+
+    class ToolMw extends TaskMiddleware {
+      tools = [extraTool]
+    }
+
+    const tasks: Task[] = [
+      {
+        name: 'a',
+        instruction: 'A',
+        tools: [toolA],
+        middleware: [new ToolMw(), new TaskMiddleware()],
+      },
+    ]
+    const mw = new TaskSteeringMiddleware({ tasks })
+
+    const names = mw._allowedToolNames('a')
+    expect(names.has('extra_tool')).toBe(true)
+    expect(names.has('tool_a')).toBe(true)
+  })
+})
+
+// ════════════════════════════════════════════════════════════
+// Auto-wrapping raw agent middleware
+// ════════════════════════════════════════════════════════════
+
+describe('auto-wrapping raw agent middleware', () => {
+  it('raw object with wrapModelCall is auto-wrapped', () => {
+    let called = false
+    const rawMw = {
+      wrapModelCall(request: ModelRequest, handler: ModelCallHandler) {
+        called = true
+        return handler(request)
+      },
+    }
+
+    const tasks: Task[] = [{ name: 'a', instruction: 'A', tools: [toolA], middleware: rawMw }]
+    const mw = new TaskSteeringMiddleware({ tasks })
+
+    const request = mockModelRequest({
+      state: { taskStatuses: { a: 'in_progress' } },
+      systemMessage: { content: 'Base' },
+      tools: mw.tools,
+    })
+    mw.wrapModelCall(request, () => ({}))
+    expect(called).toBe(true)
+  })
+
+  it('raw object in a list is auto-wrapped', () => {
+    let called = false
+    const rawMw = {
+      wrapModelCall(request: ModelRequest, handler: ModelCallHandler) {
+        called = true
+        return handler(request)
+      },
+    }
+
+    class Validator extends TaskMiddleware {
+      validateCompletion() {
+        return 'Nope.'
+      }
+    }
+
+    const tasks: Task[] = [
+      { name: 'a', instruction: 'A', tools: [toolA], middleware: [rawMw, new Validator()] },
+    ]
+    const mw = new TaskSteeringMiddleware({ tasks })
+
+    // Model call intercepted
+    const request = mockModelRequest({
+      state: { taskStatuses: { a: 'in_progress' } },
+      systemMessage: { content: 'Base' },
+      tools: mw.tools,
+    })
+    mw.wrapModelCall(request, () => ({}))
+    expect(called).toBe(true)
+
+    // Completion rejected
+    const completeReq = mockToolCallRequest({
+      toolCall: {
+        name: 'update_task_status',
+        args: { task: 'a', status: 'complete' },
+        id: 'call-1',
+      },
+      state: { taskStatuses: { a: 'in_progress' } },
+    })
+    const result = mw.wrapToolCall(completeReq, vi.fn())
+    expect((result as ToolMessageResult).content).toContain('Nope.')
+  })
+
+  it('TaskMiddleware instance is not double-wrapped', () => {
+    const validator = new TaskMiddleware()
+    const tasks: Task[] = [{ name: 'a', instruction: 'A', tools: [], middleware: validator }]
+    const mw = new TaskSteeringMiddleware({ tasks })
+    expect((mw as any)._taskMap.get('a').middleware).toBe(validator)
+  })
+
+  it('invalid middleware warns and is ignored', () => {
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {})
+
+    const tasks: Task[] = [
+      { name: 'a', instruction: 'A', tools: [toolA], middleware: 'not a middleware' as any },
+    ]
+    const mw = new TaskSteeringMiddleware({ tasks })
+
+    expect((mw as any)._taskMap.get('a').middleware).toBeUndefined()
+    expect(warnSpy).toHaveBeenCalledOnce()
+    expect(warnSpy.mock.calls[0][0]).toContain('Ignoring invalid task middleware')
+
+    warnSpy.mockRestore()
+  })
+
+  it('invalid items in list warn and are skipped', () => {
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {})
+
+    class Validator extends TaskMiddleware {
+      validateCompletion() {
+        return 'Nope.'
+      }
+    }
+
+    const tasks: Task[] = [
+      { name: 'a', instruction: 'A', tools: [toolA], middleware: [42 as any, new Validator()] },
+    ]
+    const mw = new TaskSteeringMiddleware({ tasks })
+
+    expect((mw as any)._taskMap.get('a').middleware).toBeDefined()
+    expect(warnSpy).toHaveBeenCalledOnce()
+
+    // Validator still works
+    const request = mockToolCallRequest({
+      toolCall: {
+        name: 'update_task_status',
+        args: { task: 'a', status: 'complete' },
+        id: 'call-1',
+      },
+      state: { taskStatuses: { a: 'in_progress' } },
+    })
+    const result = mw.wrapToolCall(request, vi.fn())
+    expect((result as ToolMessageResult).content).toContain('Nope.')
+
+    warnSpy.mockRestore()
+  })
+})

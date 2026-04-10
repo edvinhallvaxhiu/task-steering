@@ -1,7 +1,8 @@
 """TaskSteeringMiddleware — implicit state machine for LangChain v1 agents."""
 
 import typing
-from collections.abc import Callable
+import warnings
+from collections.abc import Awaitable, Callable
 from typing import Annotated, Any
 
 from langchain.agents.middleware import AgentMiddleware, ModelRequest, ModelResponse
@@ -13,10 +14,161 @@ from langgraph.runtime import Runtime
 from langgraph.types import Command
 from typing_extensions import TypedDict
 
+from ._hooks import WRAP_HOOK_PAIRS, overrides_base
 from .types import Task, TaskMiddleware, TaskStatus, TaskSteeringState
 
 _TRANSITION_TOOL_NAME = "update_task_status"
 _REQUIRE_ALL = ["*"]
+
+
+def _overrides_task(middleware: TaskMiddleware, method_name: str) -> bool:
+    """Check if a TaskMiddleware subclass overrides a TaskMiddleware hook."""
+    return getattr(type(middleware), method_name) is not getattr(
+        TaskMiddleware, method_name, None
+    )
+
+
+class _ComposedTaskMiddleware(TaskMiddleware):
+    """Chains multiple ``TaskMiddleware`` instances into one.
+
+    Wrap-style hooks are discovered dynamically from ``AgentMiddleware``
+    at import time via ``WRAP_HOOK_PAIRS``, so new hooks added by
+    LangChain are automatically chained — no manual updates needed.
+
+    Composition semantics (matching LangChain's agent middleware list):
+    - Wrap-style hooks: first = outermost wrapper, chain inward.
+    - ``validate_completion``: all validators run; first error wins.
+    - ``on_start`` / ``on_complete``: all fire in order.
+    - ``tools``: merged (deduplicated by name).
+    - ``state_schema``: last non-default schema wins.
+    """
+
+    def __init__(self, middlewares: list[TaskMiddleware]) -> None:
+        super().__init__()
+        self._middlewares = middlewares
+
+        # Merge tools (deduplicated)
+        seen: set[str] = set()
+        merged_tools: list = []
+        for mw in middlewares:
+            for t in getattr(mw, "tools", None) or []:
+                if t.name not in seen:
+                    seen.add(t.name)
+                    merged_tools.append(t)
+        self.tools = merged_tools
+
+        # Forward last non-default state_schema
+        for mw in reversed(middlewares):
+            schema = getattr(mw, "state_schema", None)
+            if schema is not None:
+                self.state_schema = schema
+                break
+
+        # Dynamically bind chaining methods for all discovered wrap hooks
+        for sync_name, async_name in WRAP_HOOK_PAIRS:
+            self._bind_sync_chain(sync_name)
+            if async_name:
+                self._bind_async_chain(async_name)
+
+    def _bind_sync_chain(self, method_name: str) -> None:
+        middlewares = self._middlewares
+
+        def chained(request, handler, _name=method_name):
+            chain = handler
+            for mw in reversed(middlewares):
+                if overrides_base(mw, _name):
+                    outer, inner = mw, chain
+                    chain = lambda r, _o=outer, _i=inner: getattr(_o, _name)(r, _i)
+            return chain(request)
+
+        setattr(self, method_name, chained)
+
+    def _bind_async_chain(self, method_name: str) -> None:
+        middlewares = self._middlewares
+
+        async def chained(request, handler, _name=method_name):
+            chain = handler
+            for mw in reversed(middlewares):
+                if overrides_base(mw, _name):
+                    outer, inner = mw, chain
+
+                    async def make_chain(r, _o=outer, _i=inner):
+                        return await getattr(_o, _name)(r, _i)
+
+                    chain = make_chain
+            return await chain(request)
+
+        setattr(self, method_name, chained)
+
+    def validate_completion(self, state):
+        for mw in self._middlewares:
+            if _overrides_task(mw, "validate_completion"):
+                error = mw.validate_completion(state)
+                if error:
+                    return error
+        return None
+
+    def on_start(self, state):
+        for mw in self._middlewares:
+            if _overrides_task(mw, "on_start"):
+                mw.on_start(state)
+
+    def on_complete(self, state):
+        for mw in self._middlewares:
+            if _overrides_task(mw, "on_complete"):
+                mw.on_complete(state)
+
+
+def _is_valid_middleware(mw: Any) -> bool:
+    """Check if an object is a valid middleware (TaskMiddleware or AgentMiddleware)."""
+    if isinstance(mw, (TaskMiddleware, AgentMiddleware)):
+        return True
+    # Duck-type check: has at least one wrap-style hook callable
+    for sync_name, async_name in WRAP_HOOK_PAIRS:
+        if callable(getattr(mw, sync_name, None)):
+            return True
+        if async_name and callable(getattr(mw, async_name, None)):
+            return True
+    return False
+
+
+def _coerce_middleware(mw: Any) -> TaskMiddleware | None:
+    """Coerce a middleware to TaskMiddleware, or None with a warning."""
+    if isinstance(mw, TaskMiddleware):
+        return mw
+    if isinstance(mw, AgentMiddleware):
+        from .adapter import AgentMiddlewareAdapter
+
+        return AgentMiddlewareAdapter(mw)
+    if _is_valid_middleware(mw):
+        from .adapter import AgentMiddlewareAdapter
+
+        return AgentMiddlewareAdapter(mw)
+    warnings.warn(
+        f"Ignoring invalid task middleware of type {type(mw).__name__!r}. "
+        f"Expected TaskMiddleware, AgentMiddleware, or an object with "
+        f"wrap-style hooks (e.g. wrap_model_call).",
+        stacklevel=3,
+    )
+    return None
+
+
+def _normalize_middleware(
+    middleware: TaskMiddleware | list | AgentMiddleware | None,
+) -> TaskMiddleware | None:
+    """Normalize any middleware input into a single TaskMiddleware or None."""
+    if middleware is None:
+        return None
+    if isinstance(middleware, list):
+        valid = [
+            m for m in (_coerce_middleware(x) for x in middleware) if m is not None
+        ]
+        if not valid:
+            return None
+        if len(valid) == 1:
+            return valid[0]
+        return _ComposedTaskMiddleware(valid)
+    return _coerce_middleware(middleware)
 
 
 class TaskSteeringMiddleware(AgentMiddleware[TaskSteeringState]):
@@ -60,6 +212,10 @@ class TaskSteeringMiddleware(AgentMiddleware[TaskSteeringState]):
         if dupes:
             raise ValueError(f"Duplicate task names: {dupes}")
 
+        # Normalize middleware: auto-wrap raw AgentMiddleware, compose lists
+        for task in tasks:
+            task.middleware = _normalize_middleware(task.middleware)
+
         self._tasks = tasks
         self._task_order: list[str] = [t.name for t in tasks]
         self._task_map: dict[str, Task] = {t.name: t for t in tasks}
@@ -84,7 +240,8 @@ class TaskSteeringMiddleware(AgentMiddleware[TaskSteeringState]):
         # persist in the agent's state graph and survive interrupts.
         self.state_schema = self._merge_state_schemas()
 
-        # Auto-register all tools (transition + global + every task's tools).
+        # Auto-register all tools (transition + global + every task's tools
+        # + tools contributed by task middleware adapters).
         # The agent receives these via the middleware ``tools`` attribute so
         # users don't have to duplicate them in ``create_agent(tools=...)``.
         seen: set[str] = set()
@@ -93,6 +250,12 @@ class TaskSteeringMiddleware(AgentMiddleware[TaskSteeringState]):
             self._transition_tool,
             *self._global_tools,
             *(tool for task in self._tasks for tool in task.tools),
+            *(
+                tool
+                for task in self._tasks
+                if task.middleware and hasattr(task.middleware, "tools")
+                for tool in (task.middleware.tools or [])
+            ),
         ]:
             if t.name not in seen:
                 seen.add(t.name)
@@ -148,24 +311,38 @@ class TaskSteeringMiddleware(AgentMiddleware[TaskSteeringState]):
             "messages": [nudge_msg],
         }
 
+    # ── Async node-style hooks ───────────────────────────────
+
+    async def abefore_agent(
+        self, state: TaskSteeringState, runtime: Runtime
+    ) -> dict[str, Any] | None:
+        """Async version of before_agent."""
+        return self.before_agent(state, runtime)
+
+    @hook_config(can_jump_to=["model"])
+    async def aafter_agent(
+        self, state: TaskSteeringState, runtime: Runtime
+    ) -> dict[str, Any] | None:
+        """Async version of after_agent."""
+        return self.after_agent(state, runtime)
+
     # ── Wrap-style hooks ──────────────────────────────────────
 
-    def wrap_model_call(
-        self,
-        request: ModelRequest,
-        handler: Callable[[ModelRequest], ModelResponse],
-    ) -> ModelResponse:
-        """Inject task pipeline prompt and scope tools per active task."""
+    def _prepare_model_request(
+        self, request: ModelRequest
+    ) -> tuple[ModelRequest, str | None]:
+        """Build the modified model request with pipeline prompt and scoped tools."""
         statuses = self._get_statuses(request.state)
         active_name = self._active_task(statuses)
 
-        # 1. Append task pipeline block to system prompt
         block = self._render_status_block(statuses, active_name)
-        new_content = list(request.system_message.content_blocks) + [
-            {"type": "text", "text": block}
-        ]
+        existing = (
+            list(request.system_message.content_blocks)
+            if request.system_message is not None
+            else []
+        )
+        new_content = existing + [{"type": "text", "text": block}]
 
-        # 2. Scope tools to active task + globals + transition tool
         allowed_names = self._allowed_tool_names(active_name)
         scoped = [t for t in request.tools if t.name in allowed_names]
 
@@ -173,8 +350,81 @@ class TaskSteeringMiddleware(AgentMiddleware[TaskSteeringState]):
             system_message=SystemMessage(content=new_content),
             tools=scoped,
         )
+        return modified, active_name
 
-        # 3. Delegate to task-scoped middleware if present
+    def _validate_transition(
+        self, request: ToolCallRequest, statuses: dict[str, str]
+    ) -> ToolMessage | None:
+        """Run completion validation. Returns a rejection ToolMessage or None."""
+        args = request.tool_call["args"]
+        task_name = args.get("task")
+        target = args.get("status")
+
+        if target == TaskStatus.COMPLETE.value and task_name in self._task_map:
+            task_mw = self._get_task_middleware(task_name)
+            if task_mw and self._overrides_task(task_mw, "validate_completion"):
+                error = task_mw.validate_completion(request.state)
+                if error:
+                    return ToolMessage(
+                        content=(
+                            f"Cannot complete '{task_name}': {error}. "
+                            f"Address the issues then try again."
+                        ),
+                        tool_call_id=request.tool_call["id"],
+                    )
+        return None
+
+    def _fire_lifecycle_hooks(
+        self,
+        request: ToolCallRequest,
+        result: ToolMessage | Command,
+        statuses: dict[str, str],
+    ) -> None:
+        """Fire on_start/on_complete if the transition succeeded."""
+        args = request.tool_call["args"]
+        task_name = args.get("task")
+        target = args.get("status")
+
+        if not isinstance(result, Command) or task_name not in self._task_map:
+            return
+
+        task_mw = self._get_task_middleware(task_name)
+        if not task_mw:
+            return
+
+        # Build post-transition state so hooks see the updated task_statuses
+        # (the Command hasn't been applied yet).
+        updated_statuses = {**statuses, task_name: target}
+        post_state = {**request.state, "task_statuses": updated_statuses}
+
+        if target == TaskStatus.IN_PROGRESS.value:
+            task_mw.on_start(post_state)
+        elif target == TaskStatus.COMPLETE.value:
+            task_mw.on_complete(post_state)
+
+    def _gate_tool(
+        self, request: ToolCallRequest, active_name: str | None
+    ) -> ToolMessage | None:
+        """Reject tool calls not in scope for the active task."""
+        allowed = self._allowed_tool_names(active_name)
+        if request.tool_call["name"] not in allowed:
+            return ToolMessage(
+                content=(
+                    f"Tool '{request.tool_call['name']}' is not available "
+                    f"for the current task."
+                ),
+                tool_call_id=request.tool_call["id"],
+            )
+        return None
+
+    def wrap_model_call(
+        self,
+        request: ModelRequest,
+        handler: Callable[[ModelRequest], ModelResponse],
+    ) -> ModelResponse:
+        """Inject task pipeline prompt and scope tools per active task."""
+        modified, active_name = self._prepare_model_request(request)
+
         task_mw = self._get_task_middleware(active_name)
         if task_mw and self._overrides(task_mw, "wrap_model_call"):
             return task_mw.wrap_model_call(modified, handler)
@@ -190,55 +440,68 @@ class TaskSteeringMiddleware(AgentMiddleware[TaskSteeringState]):
         statuses = self._get_statuses(request.state)
         active_name = self._active_task(statuses)
 
-        # Intercept update_task_status for completion validation + lifecycle
         if request.tool_call["name"] == _TRANSITION_TOOL_NAME:
-            args = request.tool_call["args"]
-            task_name = args.get("task")
-            target = args.get("status")
-
-            if target == TaskStatus.COMPLETE.value and task_name in self._task_map:
-                task_mw = self._get_task_middleware(task_name)
-                if task_mw and self._overrides_task(task_mw, "validate_completion"):
-                    error = task_mw.validate_completion(request.state)
-                    if error:
-                        return ToolMessage(
-                            content=(
-                                f"Cannot complete '{task_name}': {error}. "
-                                f"Address the issues then try again."
-                            ),
-                            tool_call_id=request.tool_call["id"],
-                        )
+            rejection = self._validate_transition(request, statuses)
+            if rejection:
+                return rejection
 
             result = handler(request)
-
-            # Fire lifecycle hooks on successful transition
-            if isinstance(result, Command) and task_name in self._task_map:
-                task_mw = self._get_task_middleware(task_name)
-                if task_mw:
-                    if target == TaskStatus.IN_PROGRESS.value:
-                        task_mw.on_start(request.state)
-                    elif target == TaskStatus.COMPLETE.value:
-                        task_mw.on_complete(request.state)
-
+            self._fire_lifecycle_hooks(request, result, statuses)
             return result
 
-        # Gate: reject tool calls not in scope for the active task
-        allowed = self._allowed_tool_names(active_name)
-        if request.tool_call["name"] not in allowed:
-            return ToolMessage(
-                content=(
-                    f"Tool '{request.tool_call['name']}' is not available "
-                    f"for the current task."
-                ),
-                tool_call_id=request.tool_call["id"],
-            )
+        gate = self._gate_tool(request, active_name)
+        if gate:
+            return gate
 
-        # Delegate all other tool calls to active task's middleware
         task_mw = self._get_task_middleware(active_name)
         if task_mw and self._overrides(task_mw, "wrap_tool_call"):
             return task_mw.wrap_tool_call(request, handler)
 
         return handler(request)
+
+    # ── Async wrap-style hooks ───────────────────────────────
+
+    async def awrap_model_call(
+        self,
+        request: ModelRequest,
+        handler: Callable[[ModelRequest], Awaitable[ModelResponse]],
+    ) -> ModelResponse:
+        """Async version of wrap_model_call."""
+        modified, active_name = self._prepare_model_request(request)
+
+        task_mw = self._get_task_middleware(active_name)
+        if task_mw and self._overrides(task_mw, "awrap_model_call"):
+            return await task_mw.awrap_model_call(modified, handler)
+
+        return await handler(modified)
+
+    async def awrap_tool_call(
+        self,
+        request: ToolCallRequest,
+        handler: Callable[[ToolCallRequest], Awaitable[ToolMessage | Command]],
+    ) -> ToolMessage | Command:
+        """Async version of wrap_tool_call."""
+        statuses = self._get_statuses(request.state)
+        active_name = self._active_task(statuses)
+
+        if request.tool_call["name"] == _TRANSITION_TOOL_NAME:
+            rejection = self._validate_transition(request, statuses)
+            if rejection:
+                return rejection
+
+            result = await handler(request)
+            self._fire_lifecycle_hooks(request, result, statuses)
+            return result
+
+        gate = self._gate_tool(request, active_name)
+        if gate:
+            return gate
+
+        task_mw = self._get_task_middleware(active_name)
+        if task_mw and self._overrides(task_mw, "awrap_tool_call"):
+            return await task_mw.awrap_tool_call(request, handler)
+
+        return await handler(request)
 
     # ── Internal helpers ──────────────────────────────────────
 
@@ -293,21 +556,13 @@ class TaskSteeringMiddleware(AgentMiddleware[TaskSteeringState]):
 
     @staticmethod
     def _overrides(middleware: AgentMiddleware, method_name: str) -> bool:
-        """Check if a middleware subclass actually overrides a hook method.
-
-        ``AgentMiddleware`` defines all hooks (raising ``NotImplementedError``),
-        so ``hasattr`` is always ``True``.  This checks the MRO instead.
-        """
-        return getattr(type(middleware), method_name) is not getattr(
-            AgentMiddleware, method_name, None
-        )
+        """Check if a middleware subclass actually overrides a hook method."""
+        return overrides_base(middleware, method_name)
 
     @staticmethod
     def _overrides_task(middleware: TaskMiddleware, method_name: str) -> bool:
         """Check if a TaskMiddleware subclass overrides a TaskMiddleware hook."""
-        return getattr(type(middleware), method_name) is not getattr(
-            TaskMiddleware, method_name, None
-        )
+        return _overrides_task(middleware, method_name)
 
     def _get_task_middleware(self, task_name: str | None) -> TaskMiddleware | None:
         if task_name is None:
@@ -319,7 +574,11 @@ class TaskSteeringMiddleware(AgentMiddleware[TaskSteeringState]):
         names = {_TRANSITION_TOOL_NAME}
         names.update(t.name for t in self._global_tools)
         if active_name:
-            names.update(t.name for t in self._task_map[active_name].tools)
+            task = self._task_map[active_name]
+            names.update(t.name for t in task.tools)
+            # Include tools contributed by task middleware (e.g. adapters)
+            if task.middleware and hasattr(task.middleware, "tools"):
+                names.update(t.name for t in (task.middleware.tools or []))
         return names
 
     def _render_status_block(self, statuses: dict[str, str], active: str | None) -> str:

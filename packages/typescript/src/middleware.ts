@@ -7,6 +7,7 @@ import {
   TaskMiddleware,
   getContentBlocks,
   type Task,
+  type TaskMiddlewareInput,
   type TaskSteeringState,
   type ToolLike,
   type ModelRequest,
@@ -18,6 +19,7 @@ import {
   type CommandResult,
   type ContentBlock,
 } from './types.js'
+import { AgentMiddlewareAdapter } from './adapter.js'
 
 const TRANSITION_TOOL_NAME = 'update_task_status'
 const REQUIRE_ALL = ['*']
@@ -78,6 +80,11 @@ export class TaskSteeringMiddleware {
       throw new Error(`Duplicate task names: ${uniqueDupes.join(', ')}`)
     }
 
+    // Normalize middleware: auto-wrap raw objects, compose lists
+    for (const task of tasks) {
+      task.middleware = normalizeMiddleware(task.middleware)
+    }
+
     this._tasks = tasks
     this._taskOrder = tasks.map((t) => t.name)
     this._taskMap = new Map(tasks.map((t) => [t.name, t]))
@@ -100,13 +107,18 @@ export class TaskSteeringMiddleware {
 
     this._transitionTool = this._buildTransitionTool()
 
-    // Auto-register all tools (deduplicated)
+    // Auto-register all tools (deduplicated), including tools
+    // contributed by task middleware adapters.
     const seen = new Set<string>()
     const allTools: ToolLike[] = []
-    const candidates = [
+    const candidates: ToolLike[] = [
       this._transitionTool,
       ...this._globalTools,
       ...tasks.flatMap((t) => t.tools),
+      ...tasks.flatMap((t) => {
+        const mwTools = (t.middleware as { tools?: ToolLike[] })?.tools
+        return mwTools ?? []
+      }),
     ]
     for (const t of candidates) {
       if (!seen.has(t.name)) {
@@ -177,7 +189,7 @@ export class TaskSteeringMiddleware {
 
     // 1. Append task pipeline block to system prompt
     const block = this._renderStatusBlock(statuses, activeName)
-    const existingBlocks = getContentBlocks(request.systemMessage)
+    const existingBlocks = request.systemMessage ? getContentBlocks(request.systemMessage) : []
     const newContent: ContentBlock[] = [...existingBlocks, { type: 'text', text: block }]
 
     // 2. Scope tools to active task + globals + transition tool
@@ -219,7 +231,7 @@ export class TaskSteeringMiddleware {
 
       if (target === TaskStatus.COMPLETE && this._taskMap.has(taskName)) {
         const taskMw = this._getTaskMiddleware(taskName)
-        if (taskMw && this._overridesValidation(taskMw)) {
+        if (taskMw && overridesMethod(taskMw, 'validateCompletion')) {
           const error = taskMw.validateCompletion(request.state)
           if (error) {
             return {
@@ -232,14 +244,18 @@ export class TaskSteeringMiddleware {
 
       const result = handler(request)
 
-      // Fire lifecycle hooks on successful transition
+      // Fire lifecycle hooks on successful transition.
+      // Build post-transition state so hooks see the updated
+      // taskStatuses (the Command hasn't been applied yet).
       if (this._isCommand(result) && this._taskMap.has(taskName)) {
         const taskMw = this._getTaskMiddleware(taskName)
         if (taskMw) {
+          const updatedStatuses = { ...statuses, [taskName]: target }
+          const postState = { ...request.state, taskStatuses: updatedStatuses }
           if (target === TaskStatus.IN_PROGRESS) {
-            taskMw.onStart(request.state)
+            taskMw.onStart(postState)
           } else if (target === TaskStatus.COMPLETE) {
-            taskMw.onComplete(request.state)
+            taskMw.onComplete(postState)
           }
         }
       }
@@ -378,6 +394,11 @@ export class TaskSteeringMiddleware {
       const task = this._taskMap.get(activeName)
       if (task) {
         for (const t of task.tools) names.add(t.name)
+        // Include tools contributed by task middleware (e.g. adapters)
+        const mwTools = (task.middleware as { tools?: ToolLike[] })?.tools
+        if (mwTools) {
+          for (const t of mwTools) names.add(t.name)
+        }
       }
     }
     return names
@@ -428,11 +449,131 @@ export class TaskSteeringMiddleware {
     }
   }
 
-  private _overridesValidation(middleware: TaskMiddleware): boolean {
-    return middleware.validateCompletion !== TaskMiddleware.prototype.validateCompletion
-  }
-
   private _isCommand(result: ToolMessageResult | CommandResult): result is CommandResult {
     return 'update' in result
   }
+}
+
+// ── Middleware composition ─────────────────────────────────
+
+function overridesMethod(mw: TaskMiddleware, method: keyof TaskMiddleware): boolean {
+  return (
+    (mw as Record<string, unknown>)[method] !== undefined &&
+    (mw as Record<string, unknown>)[method] !==
+      (TaskMiddleware.prototype as Record<string, unknown>)[method]
+  )
+}
+
+class ComposedTaskMiddleware extends TaskMiddleware {
+  private readonly _middlewares: TaskMiddleware[]
+  readonly tools: ToolLike[]
+
+  constructor(middlewares: TaskMiddleware[]) {
+    super()
+    this._middlewares = middlewares
+
+    // Merge tools (deduplicated)
+    const seen = new Set<string>()
+    const merged: ToolLike[] = []
+    for (const mw of middlewares) {
+      for (const t of (mw as { tools?: ToolLike[] }).tools ?? []) {
+        if (!seen.has(t.name)) {
+          seen.add(t.name)
+          merged.push(t)
+        }
+      }
+    }
+    this.tools = merged
+
+    // Wire up wrapModelCall chain (first = outermost)
+    const modelMws = middlewares.filter((mw) => mw.wrapModelCall)
+    if (modelMws.length > 0) {
+      this.wrapModelCall = (request: ModelRequest, handler: ModelCallHandler): ModelResponse => {
+        let chain = handler
+        for (let i = modelMws.length - 1; i >= 0; i--) {
+          const outer = modelMws[i]
+          const inner = chain
+          chain = (r) => outer.wrapModelCall!(r, inner)
+        }
+        return chain(request)
+      }
+    }
+
+    // Wire up wrapToolCall chain
+    const toolMws = middlewares.filter((mw) => mw.wrapToolCall)
+    if (toolMws.length > 0) {
+      this.wrapToolCall = (
+        request: ToolCallRequest,
+        handler: ToolCallHandler
+      ): ToolMessageResult | CommandResult => {
+        let chain: ToolCallHandler = handler
+        for (let i = toolMws.length - 1; i >= 0; i--) {
+          const outer = toolMws[i]
+          const inner = chain
+          chain = (r) => outer.wrapToolCall!(r, inner)
+        }
+        return chain(request)
+      }
+    }
+  }
+
+  validateCompletion(state: Record<string, unknown>): string | null {
+    for (const mw of this._middlewares) {
+      if (overridesMethod(mw, 'validateCompletion')) {
+        const error = mw.validateCompletion(state)
+        if (error) return error
+      }
+    }
+    return null
+  }
+
+  onStart(state: Record<string, unknown>): void {
+    for (const mw of this._middlewares) {
+      if (overridesMethod(mw, 'onStart')) {
+        mw.onStart(state)
+      }
+    }
+  }
+
+  onComplete(state: Record<string, unknown>): void {
+    for (const mw of this._middlewares) {
+      if (overridesMethod(mw, 'onComplete')) {
+        mw.onComplete(state)
+      }
+    }
+  }
+}
+
+function isValidMiddleware(mw: unknown): boolean {
+  if (mw instanceof TaskMiddleware) return true
+  if (typeof mw !== 'object' || mw === null) return false
+  const obj = mw as Record<string, unknown>
+  // Duck-type: has at least one wrap-style hook
+  return typeof obj.wrapModelCall === 'function' || typeof obj.wrapToolCall === 'function'
+}
+
+function coerceMiddleware(mw: TaskMiddlewareInput): TaskMiddleware | undefined {
+  if (mw instanceof TaskMiddleware) return mw
+  if (isValidMiddleware(mw)) {
+    return new AgentMiddlewareAdapter(mw as any)
+  }
+  console.warn(
+    `[langchain-task-steering] Ignoring invalid task middleware of type ` +
+      `${(mw as any)?.constructor?.name ?? typeof mw}. Expected TaskMiddleware ` +
+      `or an object with wrap-style hooks (e.g. wrapModelCall).`
+  )
+  return undefined
+}
+
+function normalizeMiddleware(
+  middleware: TaskMiddlewareInput | TaskMiddlewareInput[] | undefined
+): TaskMiddleware | undefined {
+  if (middleware == null) return undefined
+  if (Array.isArray(middleware)) {
+    const valid = middleware.map(coerceMiddleware).filter((m): m is TaskMiddleware => m != null)
+    if (valid.length === 0) return undefined
+    if (valid.length === 1) return valid[0]
+    return new ComposedTaskMiddleware(valid)
+  }
+  return coerceMiddleware(middleware)
 }

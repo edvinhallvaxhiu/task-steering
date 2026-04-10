@@ -1117,3 +1117,696 @@ class TestAfterAgent:
         result = mw.after_agent(state, runtime=None)
         assert result is not None
         assert "a" in result["messages"][0].content
+
+
+# ════════════════════════════════════════════════════════════
+# wrap_model_call — null system message
+# ════════════════════════════════════════════════════════════
+
+
+class TestNullSystemMessage:
+    def test_wrap_model_call_no_system_message(self, middleware):
+        """wrap_model_call should not crash when system_message is None."""
+        request = MockModelRequest(
+            state={
+                "task_statuses": {
+                    "step_1": "in_progress",
+                    "step_2": "pending",
+                    "step_3": "pending",
+                }
+            },
+            system_message=None,
+            tools=middleware.tools,
+        )
+
+        captured = {}
+        middleware.wrap_model_call(
+            request, lambda r: captured.update(req=r) or MagicMock()
+        )
+
+        # The pipeline block should still be injected
+        content = captured["req"].system_message.content
+        text = "\n".join(
+            block.get("text", "") for block in content if isinstance(block, dict)
+        )
+        assert "<task_pipeline>" in text
+        assert "[>] step_1 (in_progress)" in text
+
+
+# ════════════════════════════════════════════════════════════
+# Lifecycle hooks — post-transition state
+# ════════════════════════════════════════════════════════════
+
+
+class TestLifecycleHooksState:
+    def test_on_start_sees_updated_status(self):
+        """on_start should receive state with task_statuses reflecting the transition."""
+        from langgraph.types import Command
+
+        received_statuses = {}
+
+        class StateSpy(TaskMiddleware):
+            def on_start(self, state):
+                received_statuses.update(state.get("task_statuses", {}))
+
+        spy = StateSpy()
+        tasks = [Task(name="a", instruction="A", tools=[], middleware=spy)]
+        mw = TaskSteeringMiddleware(tasks=tasks)
+
+        request = MockToolCallRequest(
+            tool_call={
+                "name": "update_task_status",
+                "args": {"task": "a", "status": "in_progress"},
+                "id": "call-1",
+            },
+            state={"task_statuses": {"a": "pending"}},
+        )
+
+        handler = MagicMock(return_value=Command(update={}))
+        mw.wrap_tool_call(request, handler)
+
+        assert received_statuses["a"] == "in_progress"
+
+    def test_on_complete_sees_updated_status(self):
+        """on_complete should receive state with task_statuses reflecting the transition."""
+        from langgraph.types import Command
+
+        received_statuses = {}
+
+        class StateSpy(TaskMiddleware):
+            def on_complete(self, state):
+                received_statuses.update(state.get("task_statuses", {}))
+
+        spy = StateSpy()
+        tasks = [Task(name="a", instruction="A", tools=[], middleware=spy)]
+        mw = TaskSteeringMiddleware(tasks=tasks)
+
+        request = MockToolCallRequest(
+            tool_call={
+                "name": "update_task_status",
+                "args": {"task": "a", "status": "complete"},
+                "id": "call-1",
+            },
+            state={"task_statuses": {"a": "in_progress"}},
+        )
+
+        handler = MagicMock(return_value=Command(update={}))
+        mw.wrap_tool_call(request, handler)
+
+        assert received_statuses["a"] == "complete"
+
+
+# ════════════════════════════════════════════════════════════
+# Async hooks — awrap_model_call / awrap_tool_call
+# ════════════════════════════════════════════════════════════
+
+
+class TestAsyncHooks:
+    @pytest.mark.asyncio
+    async def test_awrap_model_call_injects_pipeline(self, middleware):
+        """awrap_model_call should inject the pipeline block like the sync version."""
+        request = MockModelRequest(
+            state={
+                "task_statuses": {
+                    "step_1": "in_progress",
+                    "step_2": "pending",
+                    "step_3": "pending",
+                }
+            },
+            system_message=MockSystemMessage("You are helpful."),
+            tools=middleware.tools,
+        )
+
+        captured = {}
+
+        async def async_handler(r):
+            captured["req"] = r
+            return MagicMock()
+
+        await middleware.awrap_model_call(request, async_handler)
+
+        content = captured["req"].system_message.content
+        text = "\n".join(
+            block.get("text", "") for block in content if isinstance(block, dict)
+        )
+        assert "You are helpful." in text
+        assert "<task_pipeline>" in text
+        assert "[>] step_1 (in_progress)" in text
+
+    @pytest.mark.asyncio
+    async def test_awrap_model_call_null_system_message(self, middleware):
+        """awrap_model_call should handle None system message."""
+        request = MockModelRequest(
+            state={
+                "task_statuses": {
+                    "step_1": "in_progress",
+                    "step_2": "pending",
+                    "step_3": "pending",
+                }
+            },
+            system_message=None,
+            tools=middleware.tools,
+        )
+
+        captured = {}
+
+        async def async_handler(r):
+            captured["req"] = r
+            return MagicMock()
+
+        await middleware.awrap_model_call(request, async_handler)
+
+        content = captured["req"].system_message.content
+        text = "\n".join(
+            block.get("text", "") for block in content if isinstance(block, dict)
+        )
+        assert "<task_pipeline>" in text
+
+    @pytest.mark.asyncio
+    async def test_awrap_tool_call_validates_completion(self):
+        """awrap_tool_call should reject completion when validator fails."""
+        tasks = [
+            Task(
+                name="a",
+                instruction="A",
+                tools=[],
+                middleware=RejectCompletionMiddleware("Not ready."),
+            ),
+        ]
+        mw = TaskSteeringMiddleware(tasks=tasks)
+
+        request = MockToolCallRequest(
+            tool_call={
+                "name": "update_task_status",
+                "args": {"task": "a", "status": "complete"},
+                "id": "call-1",
+            },
+            state={"task_statuses": {"a": "in_progress"}},
+        )
+
+        async def async_handler(r):
+            return MagicMock()
+
+        result = await mw.awrap_tool_call(request, async_handler)
+        assert isinstance(result, ToolMessage)
+        assert "Cannot complete 'a'" in result.content
+
+    @pytest.mark.asyncio
+    async def test_awrap_tool_call_lifecycle_hooks_get_post_state(self):
+        """awrap_tool_call lifecycle hooks should see post-transition state."""
+        from langgraph.types import Command
+
+        received_statuses = {}
+
+        class StateSpy(TaskMiddleware):
+            def on_start(self, state):
+                received_statuses.update(state.get("task_statuses", {}))
+
+        spy = StateSpy()
+        tasks = [Task(name="a", instruction="A", tools=[], middleware=spy)]
+        mw = TaskSteeringMiddleware(tasks=tasks)
+
+        request = MockToolCallRequest(
+            tool_call={
+                "name": "update_task_status",
+                "args": {"task": "a", "status": "in_progress"},
+                "id": "call-1",
+            },
+            state={"task_statuses": {"a": "pending"}},
+        )
+
+        async def async_handler(r):
+            return Command(update={})
+
+        await mw.awrap_tool_call(request, async_handler)
+        assert received_statuses["a"] == "in_progress"
+
+    @pytest.mark.asyncio
+    async def test_awrap_tool_call_rejects_out_of_scope(self, middleware):
+        """awrap_tool_call should reject tools not in scope."""
+        request = MockToolCallRequest(
+            tool_call={"name": "tool_a", "args": {}, "id": "call-1"},
+            state={
+                "task_statuses": {
+                    "step_1": "pending",
+                    "step_2": "pending",
+                    "step_3": "pending",
+                }
+            },
+        )
+
+        async def async_handler(r):
+            return MagicMock()
+
+        result = await middleware.awrap_tool_call(request, async_handler)
+        assert isinstance(result, ToolMessage)
+        assert "not available" in result.content
+
+    @pytest.mark.asyncio
+    async def test_abefore_agent_initializes_statuses(self, middleware):
+        """abefore_agent should initialize task_statuses like the sync version."""
+        result = await middleware.abefore_agent({"messages": []}, runtime=None)
+        assert result is not None
+        assert result["task_statuses"] == {
+            "step_1": "pending",
+            "step_2": "pending",
+            "step_3": "pending",
+        }
+
+    @pytest.mark.asyncio
+    async def test_abefore_agent_noop_when_initialized(self, middleware):
+        """abefore_agent should return None when already initialized."""
+        state = {
+            "messages": [],
+            "task_statuses": {
+                "step_1": "in_progress",
+                "step_2": "pending",
+                "step_3": "pending",
+            },
+        }
+        result = await middleware.abefore_agent(state, runtime=None)
+        assert result is None
+
+    @pytest.mark.asyncio
+    async def test_aafter_agent_nudges_incomplete(self):
+        """aafter_agent should nudge when required tasks are incomplete."""
+        tasks = [
+            Task(name="a", instruction="A", tools=[tool_a]),
+            Task(name="b", instruction="B", tools=[tool_b]),
+        ]
+        mw = TaskSteeringMiddleware(tasks=tasks)
+
+        state = {
+            "messages": [],
+            "task_statuses": {"a": "complete", "b": "pending"},
+        }
+
+        result = await mw.aafter_agent(state, runtime=None)
+        assert result is not None
+        assert result["jump_to"] == "model"
+        assert result["nudge_count"] == 1
+        assert "b" in result["messages"][0].content
+
+    @pytest.mark.asyncio
+    async def test_aafter_agent_no_nudge_when_complete(self):
+        """aafter_agent should return None when all required tasks complete."""
+        tasks = [
+            Task(name="a", instruction="A", tools=[tool_a]),
+        ]
+        mw = TaskSteeringMiddleware(tasks=tasks)
+
+        state = {
+            "messages": [],
+            "task_statuses": {"a": "complete"},
+        }
+
+        result = await mw.aafter_agent(state, runtime=None)
+        assert result is None
+
+
+# ════════════════════════════════════════════════════════════
+# Middleware list composition
+# ════════════════════════════════════════════════════════════
+
+
+class TestMiddlewareListComposition:
+    def test_single_item_list_unwrapped(self):
+        """A list with one middleware should be unwrapped to that middleware."""
+        spy = AllowCompletionMiddleware()
+        tasks = [Task(name="a", instruction="A", tools=[], middleware=[spy])]
+        mw = TaskSteeringMiddleware(tasks=tasks)
+        assert mw._task_map["a"].middleware is spy
+
+    def test_empty_list_becomes_none(self):
+        tasks = [Task(name="a", instruction="A", tools=[], middleware=[])]
+        mw = TaskSteeringMiddleware(tasks=tasks)
+        assert mw._task_map["a"].middleware is None
+
+    def test_wrap_model_call_chains_in_order(self):
+        """First middleware in list = outermost wrapper."""
+        call_order = []
+
+        class Outer(TaskMiddleware):
+            def wrap_model_call(self, request, handler):
+                call_order.append("outer")
+                return handler(request)
+
+        class Inner(TaskMiddleware):
+            def wrap_model_call(self, request, handler):
+                call_order.append("inner")
+                return handler(request)
+
+        tasks = [
+            Task(
+                name="a",
+                instruction="A",
+                tools=[tool_a],
+                middleware=[Outer(), Inner()],
+            )
+        ]
+        mw = TaskSteeringMiddleware(tasks=tasks)
+
+        request = MockModelRequest(
+            state={"task_statuses": {"a": "in_progress"}},
+            system_message=MockSystemMessage("Base"),
+            tools=mw.tools,
+        )
+        mw.wrap_model_call(request, lambda r: MagicMock())
+
+        assert call_order == ["outer", "inner"]
+
+    def test_wrap_tool_call_chains_in_order(self):
+        call_order = []
+
+        class Outer(TaskMiddleware):
+            def wrap_tool_call(self, request, handler):
+                call_order.append("outer")
+                return handler(request)
+
+        class Inner(TaskMiddleware):
+            def wrap_tool_call(self, request, handler):
+                call_order.append("inner")
+                return handler(request)
+
+        tasks = [
+            Task(
+                name="a",
+                instruction="A",
+                tools=[tool_a],
+                middleware=[Outer(), Inner()],
+            )
+        ]
+        mw = TaskSteeringMiddleware(tasks=tasks)
+
+        request = MockToolCallRequest(
+            tool_call={"name": "tool_a", "args": {}, "id": "call-1"},
+            state={"task_statuses": {"a": "in_progress"}},
+        )
+        expected = ToolMessage(content="ok", tool_call_id="call-1")
+        mw.wrap_tool_call(request, lambda r: expected)
+
+        assert call_order == ["outer", "inner"]
+
+    def test_validate_completion_first_error_wins(self):
+        class Fail1(TaskMiddleware):
+            def validate_completion(self, state):
+                return "error from first"
+
+        class Fail2(TaskMiddleware):
+            def validate_completion(self, state):
+                return "error from second"
+
+        tasks = [
+            Task(name="a", instruction="A", tools=[], middleware=[Fail1(), Fail2()])
+        ]
+        mw = TaskSteeringMiddleware(tasks=tasks)
+
+        request = MockToolCallRequest(
+            tool_call={
+                "name": "update_task_status",
+                "args": {"task": "a", "status": "complete"},
+                "id": "call-1",
+            },
+            state={"task_statuses": {"a": "in_progress"}},
+        )
+        result = mw.wrap_tool_call(request, MagicMock())
+        assert isinstance(result, ToolMessage)
+        assert "error from first" in result.content
+
+    def test_lifecycle_hooks_all_fire(self):
+        from langgraph.types import Command
+
+        started = []
+
+        class Hook1(TaskMiddleware):
+            def on_start(self, state):
+                started.append("hook1")
+
+        class Hook2(TaskMiddleware):
+            def on_start(self, state):
+                started.append("hook2")
+
+        tasks = [
+            Task(name="a", instruction="A", tools=[], middleware=[Hook1(), Hook2()])
+        ]
+        mw = TaskSteeringMiddleware(tasks=tasks)
+
+        request = MockToolCallRequest(
+            tool_call={
+                "name": "update_task_status",
+                "args": {"task": "a", "status": "in_progress"},
+                "id": "call-1",
+            },
+            state={"task_statuses": {"a": "pending"}},
+        )
+        mw.wrap_tool_call(request, lambda r: Command(update={}))
+        assert started == ["hook1", "hook2"]
+
+    def test_tools_merged_from_all_middlewares(self):
+        @tool
+        def extra_tool(x: str) -> str:
+            """Extra."""
+            return x
+
+        class ToolMw(TaskMiddleware):
+            def __init__(self):
+                super().__init__()
+                self.tools = [extra_tool]
+
+        tasks = [
+            Task(
+                name="a",
+                instruction="A",
+                tools=[tool_a],
+                middleware=[ToolMw(), AllowCompletionMiddleware()],
+            )
+        ]
+        mw = TaskSteeringMiddleware(tasks=tasks)
+
+        names = mw._allowed_tool_names(active_name="a")
+        assert "extra_tool" in names
+        assert "tool_a" in names
+
+    def test_mixed_adapter_and_task_middleware(self):
+        """A list can mix AgentMiddlewareAdapter and TaskMiddleware."""
+        from langchain.agents.middleware import AgentMiddleware
+        from langchain_task_steering import AgentMiddlewareAdapter
+
+        class Interceptor(AgentMiddleware):
+            def __init__(self):
+                super().__init__()
+                self.called = False
+
+            def wrap_model_call(self, request, handler):
+                self.called = True
+                return handler(request)
+
+        interceptor = Interceptor()
+
+        tasks = [
+            Task(
+                name="a",
+                instruction="A",
+                tools=[tool_a],
+                middleware=[
+                    AgentMiddlewareAdapter(interceptor),
+                    RejectCompletionMiddleware("Not yet."),
+                ],
+            )
+        ]
+        mw = TaskSteeringMiddleware(tasks=tasks)
+
+        # Model call should be intercepted by adapter
+        request = MockModelRequest(
+            state={"task_statuses": {"a": "in_progress"}},
+            system_message=MockSystemMessage("Base"),
+            tools=mw.tools,
+        )
+        mw.wrap_model_call(request, lambda r: MagicMock())
+        assert interceptor.called is True
+
+        # Completion should be rejected by validator
+        complete_req = MockToolCallRequest(
+            tool_call={
+                "name": "update_task_status",
+                "args": {"task": "a", "status": "complete"},
+                "id": "call-1",
+            },
+            state={"task_statuses": {"a": "in_progress"}},
+        )
+        result = mw.wrap_tool_call(complete_req, MagicMock())
+        assert isinstance(result, ToolMessage)
+        assert "Not yet." in result.content
+
+
+# ════════════════════════════════════════════════════════════
+# Auto-wrapping raw AgentMiddleware
+# ════════════════════════════════════════════════════════════
+
+
+class TestAutoWrapping:
+    def test_raw_agent_middleware_auto_wrapped(self):
+        """Passing a raw AgentMiddleware should auto-wrap in adapter."""
+        from langchain.agents.middleware import AgentMiddleware
+        from langchain_task_steering.adapter import AgentMiddlewareAdapter
+
+        class MyMw(AgentMiddleware):
+            def __init__(self):
+                super().__init__()
+                self.called = False
+
+            def wrap_model_call(self, request, handler):
+                self.called = True
+                return handler(request)
+
+        inner = MyMw()
+        tasks = [Task(name="a", instruction="A", tools=[tool_a], middleware=inner)]
+        mw = TaskSteeringMiddleware(tasks=tasks)
+
+        # Should have been wrapped
+        assert isinstance(mw._task_map["a"].middleware, AgentMiddlewareAdapter)
+
+        # Should still work
+        request = MockModelRequest(
+            state={"task_statuses": {"a": "in_progress"}},
+            system_message=MockSystemMessage("Base"),
+            tools=mw.tools,
+        )
+        mw.wrap_model_call(request, lambda r: MagicMock())
+        assert inner.called is True
+
+    def test_raw_agent_middleware_in_list(self):
+        """Raw AgentMiddleware in a list should be auto-wrapped."""
+        from langchain.agents.middleware import AgentMiddleware
+
+        class MyMw(AgentMiddleware):
+            def __init__(self):
+                super().__init__()
+                self.called = False
+
+            def wrap_model_call(self, request, handler):
+                self.called = True
+                return handler(request)
+
+        inner = MyMw()
+        tasks = [
+            Task(
+                name="a",
+                instruction="A",
+                tools=[tool_a],
+                middleware=[inner, RejectCompletionMiddleware("Nope.")],
+            )
+        ]
+        mw = TaskSteeringMiddleware(tasks=tasks)
+
+        # Model call should be intercepted
+        request = MockModelRequest(
+            state={"task_statuses": {"a": "in_progress"}},
+            system_message=MockSystemMessage("Base"),
+            tools=mw.tools,
+        )
+        mw.wrap_model_call(request, lambda r: MagicMock())
+        assert inner.called is True
+
+        # Completion should be rejected
+        complete_req = MockToolCallRequest(
+            tool_call={
+                "name": "update_task_status",
+                "args": {"task": "a", "status": "complete"},
+                "id": "call-1",
+            },
+            state={"task_statuses": {"a": "in_progress"}},
+        )
+        result = mw.wrap_tool_call(complete_req, MagicMock())
+        assert isinstance(result, ToolMessage)
+        assert "Nope." in result.content
+
+    def test_task_middleware_not_double_wrapped(self):
+        """TaskMiddleware should pass through without wrapping."""
+        from langchain_task_steering.adapter import AgentMiddlewareAdapter
+
+        mw_instance = RejectCompletionMiddleware("No.")
+        tasks = [Task(name="a", instruction="A", tools=[], middleware=mw_instance)]
+        mw = TaskSteeringMiddleware(tasks=tasks)
+
+        assert mw._task_map["a"].middleware is mw_instance
+        assert not isinstance(mw._task_map["a"].middleware, AgentMiddlewareAdapter)
+
+    def test_invalid_middleware_warns_and_ignored(self):
+        """Passing an invalid object should warn and be ignored."""
+        import warnings
+
+        with warnings.catch_warnings(record=True) as w:
+            warnings.simplefilter("always")
+            tasks = [
+                Task(
+                    name="a",
+                    instruction="A",
+                    tools=[tool_a],
+                    middleware="not a middleware",
+                )
+            ]
+            mw = TaskSteeringMiddleware(tasks=tasks)
+
+        assert mw._task_map["a"].middleware is None
+        assert len(w) == 1
+        assert "Ignoring invalid task middleware" in str(w[0].message)
+
+    def test_invalid_in_list_warns_and_skipped(self):
+        """Invalid items in a list should be warned and skipped."""
+        import warnings
+
+        with warnings.catch_warnings(record=True) as w:
+            warnings.simplefilter("always")
+            tasks = [
+                Task(
+                    name="a",
+                    instruction="A",
+                    tools=[tool_a],
+                    middleware=[42, RejectCompletionMiddleware("No.")],
+                )
+            ]
+            mw = TaskSteeringMiddleware(tasks=tasks)
+
+        # Invalid 42 is skipped, RejectCompletionMiddleware survives
+        assert mw._task_map["a"].middleware is not None
+        assert len(w) == 1
+        assert "Ignoring invalid task middleware" in str(w[0].message)
+
+        # Validator still works
+        complete_req = MockToolCallRequest(
+            tool_call={
+                "name": "update_task_status",
+                "args": {"task": "a", "status": "complete"},
+                "id": "call-1",
+            },
+            state={"task_statuses": {"a": "in_progress"}},
+        )
+        result = mw.wrap_tool_call(complete_req, MagicMock())
+        assert isinstance(result, ToolMessage)
+        assert "No." in result.content
+
+    def test_duck_typed_object_accepted(self):
+        """An object with wrap_model_call should be auto-wrapped."""
+
+        class DuckMw:
+            def __init__(self):
+                self.called = False
+
+            def wrap_model_call(self, request, handler):
+                self.called = True
+                return handler(request)
+
+        duck = DuckMw()
+        tasks = [Task(name="a", instruction="A", tools=[tool_a], middleware=duck)]
+        mw = TaskSteeringMiddleware(tasks=tasks)
+
+        assert mw._task_map["a"].middleware is not None
+
+        request = MockModelRequest(
+            state={"task_statuses": {"a": "in_progress"}},
+            system_message=MockSystemMessage("Base"),
+            tools=mw.tools,
+        )
+        mw.wrap_model_call(request, lambda r: MagicMock())
+        assert duck.called is True

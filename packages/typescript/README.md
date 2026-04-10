@@ -173,6 +173,47 @@ class ThreatsMiddleware extends TaskMiddleware {
 | `onComplete(state)`               | After successful `complete` transition    | Side effects (trail capture, cleanup)          |
 | `wrapToolCall(request, handler)`  | On every tool call during this task       | Mid-task tool gating / modification            |
 | `wrapModelCall(request, handler)` | On every model call during this task      | Extra prompt injection / request modification  |
+| `tools` _(property)_              | At middleware construction                | Extra tools to register and scope to this task |
+
+## Using community middleware at task scope
+
+Any object with `wrapModelCall` or `wrapToolCall` can be passed directly as task middleware — it's auto-wrapped in `AgentMiddlewareAdapter`:
+
+```typescript
+import { TaskSteeringMiddleware } from 'langchain-task-steering'
+
+const pipeline = new TaskSteeringMiddleware({
+  tasks: [
+    {
+      name: 'research',
+      instruction: 'Research the topic thoroughly.',
+      tools: [searchTool],
+      middleware: summarizationMiddleware, // auto-wrapped
+    },
+  ],
+})
+```
+
+The adapter forwards `wrapModelCall`, `wrapToolCall`, and `tools` from the inner middleware. Agent-level hooks (`beforeAgent`, `afterAgent`) are not forwarded. Invalid middleware objects are warned and skipped.
+
+## Middleware composition
+
+Tasks accept a list of middleware, composed like LangChain's `create_agent(middleware=[...])`:
+
+```typescript
+{
+  name: 'research',
+  instruction: 'Research the topic thoroughly.',
+  tools: [searchTool],
+  middleware: [summarizationMw, new ResearchValidator()],
+}
+```
+
+Composition semantics:
+- **Wrap-style hooks** (`wrapModelCall`, `wrapToolCall`): first = outermost wrapper.
+- **`validateCompletion`**: all validators run; first error wins.
+- **`onStart` / `onComplete`**: all fire in order.
+- **`tools`**: merged from all middleware, deduplicated.
 
 ## Configuration
 
@@ -193,7 +234,7 @@ const pipeline = new TaskSteeringMiddleware({
 | `name`        | yes      | Unique identifier (used in prompts and state).          |
 | `instruction` | yes      | Injected into system prompt when this task is active.   |
 | `tools`       | yes      | Tools visible when this task is `IN_PROGRESS`.          |
-| `middleware`  | no       | Scoped `TaskMiddleware` — only active during this task. |
+| `middleware`  | no       | Scoped middleware — a `TaskMiddleware`, agent middleware object (auto-wrapped), or a list of them. Only active during this task. |
 
 ## Agent integration
 

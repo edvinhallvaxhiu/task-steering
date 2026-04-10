@@ -80,11 +80,13 @@ class Task:
         instruction: Injected into the system prompt when this task is active.
         tools: LangChain tools available when this task is IN_PROGRESS.
         middleware: Optional scoped middleware, active only when this task
-            is IN_PROGRESS. Can implement any ``AgentMiddleware`` hook plus
+            is IN_PROGRESS. Can be a single ``TaskMiddleware``, a list of
+            them (composed in order, first = outermost), or ``None``.
+            Each can implement any ``AgentMiddleware`` hook plus
             ``validate_completion`` for completion gating.
     """
 
     name: str
     instruction: str
     tools: list
-    middleware: "TaskMiddleware | None" = None
+    middleware: "TaskMiddleware | AgentMiddleware | list[TaskMiddleware | AgentMiddleware] | None" = None

@@ -194,6 +194,57 @@ pipeline = TaskSteeringMiddleware(
 | `wrap_tool_call(request, handler)` | On every tool call during this task | Mid-task tool gating / modification |
 | `wrap_model_call(request, handler)` | On every model call during this task | Extra prompt injection / request modification |
 | `state_schema` | At middleware init | Merge custom state fields into the agent's state |
+| `tools` *(property)* | At middleware construction | Extra tools to register and scope to this task |
+
+## Using community middleware at task scope
+
+Standard `AgentMiddleware` instances can be passed directly to a task — they're auto-wrapped in `AgentMiddlewareAdapter`:
+
+```python
+from langchain.agents.middleware import SummarizationMiddleware
+from langchain_task_steering import Task, TaskSteeringMiddleware
+
+pipeline = TaskSteeringMiddleware(
+    tasks=[
+        Task(
+            name="research",
+            instruction="Research the topic thoroughly.",
+            tools=[search_tool],
+            middleware=SummarizationMiddleware(),  # auto-wrapped
+        ),
+    ],
+)
+```
+
+The adapter forwards `wrap_model_call`, `wrap_tool_call` (and their async counterparts), `tools`, and `state_schema` from the inner middleware. Agent-level hooks (`before_agent`, `after_agent`) are not forwarded. Invalid middleware objects are warned and skipped.
+
+Wrap-style hooks are discovered dynamically from `AgentMiddleware` at import time, so new hooks added by future LangChain versions are picked up automatically.
+
+## Middleware composition
+
+Tasks accept a list of middleware, composed like LangChain's `create_agent(middleware=[...])`:
+
+```python
+Task(
+    name="research",
+    instruction="Research the topic thoroughly.",
+    tools=[search_tool],
+    middleware=[
+        SummarizationMiddleware(),   # auto-wrapped, outermost hook wrapper
+        ResearchValidator(),         # TaskMiddleware with validate_completion
+    ],
+)
+```
+
+Composition semantics:
+- **Wrap-style hooks** (`wrap_model_call`, `wrap_tool_call`): first = outermost wrapper.
+- **`validate_completion`**: all validators run; first error wins.
+- **`on_start` / `on_complete`**: all fire in order.
+- **`tools`**: merged from all middleware, deduplicated.
+
+## Async support
+
+All middleware hooks have async counterparts (`awrap_model_call`, `awrap_tool_call`, `abefore_agent`, `aafter_agent`). Agents using `astream()` or `ainvoke()` are fully supported.
 
 ### Persistent state for task middleware
 
@@ -252,7 +303,7 @@ The nudge mechanism uses the `after_agent` hook with `jump_to: "model"` to re-en
 | `name` | yes | Unique identifier (used in prompts and state). |
 | `instruction` | yes | Injected into system prompt when this task is active. |
 | `tools` | yes | Tools visible when this task is `IN_PROGRESS`. |
-| `middleware` | no | Scoped `TaskMiddleware` — only active during this task. |
+| `middleware` | no | Scoped middleware — a `TaskMiddleware`, `AgentMiddleware` (auto-wrapped), or a list of them. Only active during this task. |
 
 ## Composability
 
