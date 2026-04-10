@@ -9,12 +9,15 @@ import {
   type Task,
   type TaskMiddlewareInput,
   type TaskSteeringState,
+  type SkillMetadata,
   type ToolLike,
   type ModelRequest,
   type ModelResponse,
   type ModelCallHandler,
+  type AsyncModelCallHandler,
   type ToolCallRequest,
   type ToolCallHandler,
+  type AsyncToolCallHandler,
   type ToolMessageResult,
   type CommandResult,
   type ContentBlock,
@@ -22,14 +25,20 @@ import {
 import { AgentMiddlewareAdapter } from './adapter.js'
 
 const TRANSITION_TOOL_NAME = 'update_task_status'
-const REQUIRE_ALL = ['*']
+const REQUIRE_ALL = ['*'] as const
 
 export interface TaskSteeringMiddlewareConfig {
   tasks: Task[]
   globalTools?: ToolLike[]
   enforceOrder?: boolean
-  requiredTasks?: string[] | null
+  requiredTasks?: readonly string[] | null
   maxNudges?: number
+  /** When true, known backend tools pass through the tool filter on all tasks. */
+  backendToolsPassthrough?: boolean
+  /** Override the default backend tools whitelist. `null`/`undefined` uses DEFAULT_BACKEND_TOOLS. */
+  backendTools?: ReadonlySet<string> | null
+  /** Skill names available regardless of active task. */
+  globalSkills?: string[]
 }
 
 /**
@@ -48,6 +57,28 @@ export interface TaskSteeringMiddlewareConfig {
  *   (`wrapToolCall`, `wrapModelCall`).
  */
 export class TaskSteeringMiddleware {
+  /** Known backend tool names — whitelisted when `backendToolsPassthrough` is enabled. */
+  static readonly DEFAULT_BACKEND_TOOLS: ReadonlySet<string> = new Set([
+    // FilesystemMiddleware
+    'ls',
+    'read_file',
+    'write_file',
+    'edit_file',
+    'glob',
+    'grep',
+    'execute',
+    // TodoListMiddleware
+    'write_todos',
+    // SubAgentMiddleware
+    'task',
+    // AsyncSubAgentMiddleware
+    'start_async_task',
+    'check_async_task',
+    'update_async_task',
+    'cancel_async_task',
+    'list_async_tasks',
+  ])
+
   private readonly _tasks: Task[]
   private readonly _taskOrder: string[]
   private readonly _taskMap: Map<string, Task>
@@ -56,6 +87,15 @@ export class TaskSteeringMiddleware {
   private readonly _maxNudges: number
   private readonly _requiredTasks: Set<string>
   private readonly _transitionTool: ToolLike
+
+  // Backend tools passthrough
+  private _backendToolsPassthrough: boolean
+  private readonly _backendTools: ReadonlySet<string>
+
+  // Task-scoped skills
+  private readonly _globalSkills: string[]
+  private readonly _skillsActive: boolean
+  private readonly _skillRequiredTools: ReadonlySet<string>
 
   /** All tools registered by this middleware. */
   readonly tools: ToolLike[]
@@ -67,6 +107,9 @@ export class TaskSteeringMiddleware {
       enforceOrder = true,
       requiredTasks = REQUIRE_ALL,
       maxNudges = 3,
+      backendToolsPassthrough = false,
+      backendTools = null,
+      globalSkills = [],
     } = config
 
     if (tasks.length === 0) {
@@ -80,14 +123,16 @@ export class TaskSteeringMiddleware {
       throw new Error(`Duplicate task names: ${uniqueDupes.join(', ')}`)
     }
 
-    // Normalize middleware: auto-wrap raw objects, compose lists
-    for (const task of tasks) {
+    // Normalize middleware on shallow copies to avoid mutating the caller's objects
+    const tasksCopy = tasks.map((t) => ({ ...t }))
+    for (const task of tasksCopy) {
       task.middleware = normalizeMiddleware(task.middleware)
+      task.tools = [...task.tools]
     }
 
-    this._tasks = tasks
-    this._taskOrder = tasks.map((t) => t.name)
-    this._taskMap = new Map(tasks.map((t) => [t.name, t]))
+    this._tasks = tasksCopy
+    this._taskOrder = tasksCopy.map((t) => t.name)
+    this._taskMap = new Map(tasksCopy.map((t) => [t.name, t]))
     this._globalTools = globalTools
     this._enforceOrder = enforceOrder
     this._maxNudges = maxNudges
@@ -104,6 +149,20 @@ export class TaskSteeringMiddleware {
     } else {
       this._requiredTasks = new Set()
     }
+
+    // ── Backend tools passthrough ────────────────────────────
+    this._backendTools =
+      backendTools != null ? new Set(backendTools) : TaskSteeringMiddleware.DEFAULT_BACKEND_TOOLS
+    this._backendToolsPassthrough = backendToolsPassthrough
+
+    // ── Task-scoped skills ───────────────────────────────────
+    // Skills are active if any task defines skills or globalSkills are set.
+    // Skill metadata comes from state (e.g. loaded by SkillsMiddleware in
+    // create_deep_agent). This middleware only filters, never loads.
+    this._globalSkills = [...globalSkills]
+    this._skillsActive =
+      tasksCopy.some((t) => t.skills && t.skills.length > 0) || this._globalSkills.length > 0
+    this._skillRequiredTools = this._skillsActive ? new Set(['read_file', 'ls']) : new Set()
 
     this._transitionTool = this._buildTransitionTool()
 
@@ -132,18 +191,21 @@ export class TaskSteeringMiddleware {
   // ── Node-style hooks ──────────────────────────────────
 
   /**
-   * Initialize task_statuses on first invocation.
+   * Initialize task_statuses and load skills on first invocation.
    * Returns state updates, or null if already initialized.
    */
   beforeAgent(state: TaskSteeringState): Record<string, unknown> | null {
+    const updates: Record<string, unknown> = {}
+
     if (state.taskStatuses == null) {
       const statuses: Record<string, string> = {}
       for (const t of this._tasks) {
         statuses[t.name] = TaskStatus.PENDING
       }
-      return { taskStatuses: statuses }
+      updates.taskStatuses = statuses
     }
-    return null
+
+    return Object.keys(updates).length > 0 ? updates : null
   }
 
   /**
@@ -173,8 +235,104 @@ export class TaskSteeringMiddleware {
         {
           role: 'human',
           content: `You have not completed the following required tasks: ${taskList}. Please continue.`,
+          additional_kwargs: {
+            task_steering: { kind: 'nudge', incomplete_tasks: incomplete },
+          },
         },
       ],
+    }
+  }
+
+  // ── Shared request preparation ─────────────────────────
+
+  /**
+   * Build the modified model request with pipeline prompt and scoped tools.
+   * Shared between sync and async wrapModelCall.
+   */
+  private _prepareModelRequest(request: ModelRequest): {
+    modified: ModelRequest
+    activeName: string | null
+  } {
+    const statuses = this._getStatuses(request.state as TaskSteeringState)
+    const activeName = this._activeTask(statuses)
+
+    const block = this._renderStatusBlock(statuses, activeName, request.state)
+    let existingBlocks = request.systemMessage ? getContentBlocks(request.systemMessage) : []
+
+    // Strip SkillsMiddleware's global prompt injection — we replace it with
+    // per-task scoped skills in the pipeline block.
+    if (this._skillsActive) {
+      existingBlocks = existingBlocks.filter(
+        (b) => !(b.type === 'text' && b.text?.includes('## Skills System'))
+      )
+    }
+
+    const newContent: ContentBlock[] = [...existingBlocks, { type: 'text', text: block }]
+
+    const allowedNames = this._allowedToolNames(activeName)
+    const scoped = request.tools.filter((t) => allowedNames.has(t.name))
+
+    const modified = request.override({
+      systemMessage: { content: newContent },
+      tools: scoped,
+    })
+
+    return { modified, activeName }
+  }
+
+  /**
+   * Pre-handler validation: reject starting a task when another is in progress.
+   * Returns rejection message or null.
+   */
+  private _rejectConcurrentStart(
+    request: ToolCallRequest,
+    statuses: Record<string, string>,
+    taskName: string,
+    target: string
+  ): ToolMessageResult | null {
+    if (target !== TaskStatus.IN_PROGRESS) return null
+    const active = this._taskOrder.filter((name) => statuses[name] === TaskStatus.IN_PROGRESS)
+    if (active.length > 0) {
+      return {
+        content: `Cannot start '${taskName}': '${active[0]}' is already in progress. Complete it first.`,
+        toolCallId: request.toolCall.id,
+      }
+    }
+    return null
+  }
+
+  /** Reject tool calls not in scope for the active task. */
+  private _gateTool(request: ToolCallRequest, activeName: string | null): ToolMessageResult | null {
+    const allowed = this._allowedToolNames(activeName)
+    if (!allowed.has(request.toolCall.name)) {
+      return {
+        content: `Tool '${request.toolCall.name}' is not available for the current task.`,
+        toolCallId: request.toolCall.id,
+      }
+    }
+    return null
+  }
+
+  /**
+   * Fire sync lifecycle hooks after a successful transition.
+   * Build post-transition state so hooks see the updated taskStatuses.
+   */
+  private _fireLifecycleHooks(
+    request: ToolCallRequest,
+    result: ToolMessageResult | CommandResult,
+    statuses: Record<string, string>,
+    taskName: string,
+    target: string
+  ): void {
+    if (!this._isCommand(result) || !this._taskMap.has(taskName)) return
+    const taskMw = this._getTaskMiddleware(taskName)
+    if (!taskMw) return
+    const updatedStatuses = { ...statuses, [taskName]: target }
+    const postState = { ...request.state, taskStatuses: updatedStatuses }
+    if (target === TaskStatus.IN_PROGRESS) {
+      taskMw.onStart(postState)
+    } else if (target === TaskStatus.COMPLETE) {
+      taskMw.onComplete(postState)
     }
   }
 
@@ -184,24 +342,8 @@ export class TaskSteeringMiddleware {
    * Inject task pipeline prompt and scope tools per active task.
    */
   wrapModelCall(request: ModelRequest, handler: ModelCallHandler): ModelResponse {
-    const statuses = this._getStatuses(request.state as TaskSteeringState)
-    const activeName = this._activeTask(statuses)
+    const { modified, activeName } = this._prepareModelRequest(request)
 
-    // 1. Append task pipeline block to system prompt
-    const block = this._renderStatusBlock(statuses, activeName)
-    const existingBlocks = request.systemMessage ? getContentBlocks(request.systemMessage) : []
-    const newContent: ContentBlock[] = [...existingBlocks, { type: 'text', text: block }]
-
-    // 2. Scope tools to active task + globals + transition tool
-    const allowedNames = this._allowedToolNames(activeName)
-    const scoped = request.tools.filter((t) => allowedNames.has(t.name))
-
-    const modified = request.override({
-      systemMessage: { content: newContent },
-      tools: scoped,
-    })
-
-    // 3. Delegate to task-scoped middleware if present
     const taskMw = this._getTaskMiddleware(activeName)
     if (taskMw?.wrapModelCall) {
       return taskMw.wrapModelCall(modified, handler)
@@ -220,14 +362,12 @@ export class TaskSteeringMiddleware {
     const statuses = this._getStatuses(request.state as TaskSteeringState)
     const activeName = this._activeTask(statuses)
 
-    // Intercept update_task_status for completion validation + lifecycle
     if (request.toolCall.name === TRANSITION_TOOL_NAME) {
-      const args = request.toolCall.args as {
-        task: string
-        status: string
-      }
-      const taskName = args.task
-      const target = args.status
+      const args = request.toolCall.args as { task: string; status: string }
+      const { task: taskName, status: target } = args
+
+      const concurrentReject = this._rejectConcurrentStart(request, statuses, taskName, target)
+      if (concurrentReject) return concurrentReject
 
       if (target === TaskStatus.COMPLETE && this._taskMap.has(taskName)) {
         const taskMw = this._getTaskMiddleware(taskName)
@@ -243,36 +383,13 @@ export class TaskSteeringMiddleware {
       }
 
       const result = handler(request)
-
-      // Fire lifecycle hooks on successful transition.
-      // Build post-transition state so hooks see the updated
-      // taskStatuses (the Command hasn't been applied yet).
-      if (this._isCommand(result) && this._taskMap.has(taskName)) {
-        const taskMw = this._getTaskMiddleware(taskName)
-        if (taskMw) {
-          const updatedStatuses = { ...statuses, [taskName]: target }
-          const postState = { ...request.state, taskStatuses: updatedStatuses }
-          if (target === TaskStatus.IN_PROGRESS) {
-            taskMw.onStart(postState)
-          } else if (target === TaskStatus.COMPLETE) {
-            taskMw.onComplete(postState)
-          }
-        }
-      }
-
+      this._fireLifecycleHooks(request, result, statuses, taskName, target)
       return result
     }
 
-    // Gate: reject tool calls not in scope for the active task
-    const allowed = this._allowedToolNames(activeName)
-    if (!allowed.has(request.toolCall.name)) {
-      return {
-        content: `Tool '${request.toolCall.name}' is not available for the current task.`,
-        toolCallId: request.toolCall.id,
-      }
-    }
+    const gate = this._gateTool(request, activeName)
+    if (gate) return gate
 
-    // Delegate all other tool calls to active task's middleware
     const taskMw = this._getTaskMiddleware(activeName)
     if (taskMw?.wrapToolCall) {
       return taskMw.wrapToolCall(request, handler)
@@ -316,6 +433,13 @@ export class TaskSteeringMiddleware {
     const current = statuses[task]
 
     // Enforce valid transitions: pending -> in_progress -> complete
+    if (current === TaskStatus.COMPLETE) {
+      return {
+        content: `Task '${task}' is already complete.`,
+        toolCallId,
+      }
+    }
+
     const validNext: Record<string, string> = {
       [TaskStatus.PENDING]: TaskStatus.IN_PROGRESS,
       [TaskStatus.IN_PROGRESS]: TaskStatus.COMPLETE,
@@ -324,7 +448,7 @@ export class TaskSteeringMiddleware {
     const expected = validNext[current]
     if (expected !== status) {
       return {
-        content: `Cannot transition '${task}' from '${current}' to '${status}'. Expected next: '${expected ?? 'N/A'}'.`,
+        content: `Cannot transition '${task}' from '${current}' to '${status}'. Expected next: '${expected}'.`,
         toolCallId,
       }
     }
@@ -352,6 +476,7 @@ export class TaskSteeringMiddleware {
     return {
       update: {
         taskStatuses: statuses,
+        nudgeCount: 0,
         messages: [
           {
             role: 'tool',
@@ -383,7 +508,8 @@ export class TaskSteeringMiddleware {
 
   private _getTaskMiddleware(taskName: string | null): TaskMiddleware | undefined {
     if (!taskName) return undefined
-    return this._taskMap.get(taskName)?.middleware
+    // After normalization in the constructor, middleware is always TaskMiddleware | undefined
+    return this._taskMap.get(taskName)?.middleware as TaskMiddleware | undefined
   }
 
   /** @internal */
@@ -401,11 +527,43 @@ export class TaskSteeringMiddleware {
         }
       }
     }
+
+    // Backend tools passthrough
+    if (this._backendToolsPassthrough) {
+      for (const t of this._backendTools) names.add(t)
+    }
+
+    // Skills auto-whitelist
+    if (this._skillsActive) {
+      for (const t of this._skillRequiredTools) names.add(t)
+    }
+
     return names
   }
 
+  /** Return skill names visible for the given active task. */
+  private _allowedSkillNames(activeName: string | null): Set<string> {
+    const names = new Set(this._globalSkills)
+    if (activeName) {
+      const task = this._taskMap.get(activeName)
+      if (task?.skills) {
+        for (const s of task.skills) names.add(s)
+      }
+    }
+    return names
+  }
+
+  /** Return the effective backend tools whitelist. */
+  getBackendTools(): ReadonlySet<string> {
+    return this._backendTools
+  }
+
   /** @internal */
-  _renderStatusBlock(statuses: Record<string, string>, active: string | null): string {
+  _renderStatusBlock(
+    statuses: Record<string, string>,
+    active: string | null,
+    state?: Record<string, unknown>
+  ): string {
     const icons: Record<string, string> = {
       [TaskStatus.PENDING]: '[ ]',
       [TaskStatus.IN_PROGRESS]: '[>]',
@@ -415,7 +573,7 @@ export class TaskSteeringMiddleware {
     const lines: string[] = ['\n<task_pipeline>']
     for (const t of this._tasks) {
       const s = statuses[t.name]
-      lines.push(`  ${icons[s]} ${t.name} (${s})`)
+      lines.push(`  ${icons[s] ?? '[?]'} ${t.name} (${s})`)
     }
 
     if (active) {
@@ -425,11 +583,33 @@ export class TaskSteeringMiddleware {
       lines.push('  </current_task>')
     }
 
-    if (this._enforceOrder) {
-      const orderStr = this._taskOrder.join(' -> ')
+    // ── Skill rendering ──────────────────────────────────────
+    let hasVisibleSkills = false
+    if (this._skillsActive && state != null) {
+      const allSkills = (state.skillsMetadata as SkillMetadata[] | undefined) ?? []
+      const allowedNames = this._allowedSkillNames(active)
+      const visibleSkills = allSkills.filter((s) => allowedNames.has(s.name))
+      if (visibleSkills.length > 0) {
+        hasVisibleSkills = true
+        lines.push('\n  <available_skills>')
+        for (const skill of visibleSkills) {
+          const desc = skill.description || 'No description.'
+          lines.push(`    - ${skill.name}: ${desc} Path: ${skill.path}`)
+        }
+        lines.push('  </available_skills>')
+      }
+    }
+
+    if (this._enforceOrder || hasVisibleSkills) {
       lines.push('\n  <rules>')
-      lines.push(`    Required order: ${orderStr}`)
+      if (this._enforceOrder) {
+        const orderStr = this._taskOrder.join(' -> ')
+        lines.push(`    Required order: ${orderStr}`)
+      }
       lines.push('    Use update_task_status to advance. Do not skip tasks.')
+      if (hasVisibleSkills) {
+        lines.push('    To use a skill, read its SKILL.md file for full instructions.')
+      }
       lines.push('  </rules>')
     }
 
@@ -452,15 +632,100 @@ export class TaskSteeringMiddleware {
   private _isCommand(result: ToolMessageResult | CommandResult): result is CommandResult {
     return 'update' in result
   }
+
+  // ── Async wrap-style hooks ─────────────────────────────
+
+  /**
+   * Async version of wrapModelCall.
+   */
+  async awrapModelCall(
+    request: ModelRequest,
+    handler: AsyncModelCallHandler
+  ): Promise<ModelResponse> {
+    const { modified, activeName } = this._prepareModelRequest(request)
+
+    const taskMw = this._getTaskMiddleware(activeName)
+    if (taskMw?.wrapModelCall) {
+      return taskMw.wrapModelCall(modified, handler as unknown as ModelCallHandler)
+    }
+
+    return handler(modified)
+  }
+
+  /**
+   * Async version of wrapToolCall.
+   * Uses aValidateCompletion, aOnStart, aOnComplete for async lifecycle.
+   */
+  async awrapToolCall(
+    request: ToolCallRequest,
+    handler: AsyncToolCallHandler
+  ): Promise<ToolMessageResult | CommandResult> {
+    const statuses = this._getStatuses(request.state as TaskSteeringState)
+    const activeName = this._activeTask(statuses)
+
+    if (request.toolCall.name === TRANSITION_TOOL_NAME) {
+      const args = request.toolCall.args as { task: string; status: string }
+      const { task: taskName, status: target } = args
+
+      const concurrentReject = this._rejectConcurrentStart(request, statuses, taskName, target)
+      if (concurrentReject) return concurrentReject
+
+      // Async completion validation
+      if (target === TaskStatus.COMPLETE && this._taskMap.has(taskName)) {
+        const taskMw = this._getTaskMiddleware(taskName)
+        if (
+          taskMw &&
+          (overridesMethod(taskMw, 'aValidateCompletion') ||
+            overridesMethod(taskMw, 'validateCompletion'))
+        ) {
+          const error = await taskMw.aValidateCompletion(request.state)
+          if (error) {
+            return {
+              content: `Cannot complete '${taskName}': ${error}. Address the issues then try again.`,
+              toolCallId: request.toolCall.id,
+            }
+          }
+        }
+      }
+
+      const result = await handler(request)
+
+      // Async lifecycle hooks
+      if (this._isCommand(result) && this._taskMap.has(taskName)) {
+        const taskMw = this._getTaskMiddleware(taskName)
+        if (taskMw) {
+          const updatedStatuses = { ...statuses, [taskName]: target }
+          const postState = { ...request.state, taskStatuses: updatedStatuses }
+          if (target === TaskStatus.IN_PROGRESS) {
+            await taskMw.aOnStart(postState)
+          } else if (target === TaskStatus.COMPLETE) {
+            await taskMw.aOnComplete(postState)
+          }
+        }
+      }
+
+      return result
+    }
+
+    const gate = this._gateTool(request, activeName)
+    if (gate) return gate
+
+    const taskMw = this._getTaskMiddleware(activeName)
+    if (taskMw?.wrapToolCall) {
+      return taskMw.wrapToolCall(request, handler as unknown as ToolCallHandler)
+    }
+
+    return handler(request)
+  }
 }
 
 // ── Middleware composition ─────────────────────────────────
 
 function overridesMethod(mw: TaskMiddleware, method: keyof TaskMiddleware): boolean {
   return (
-    (mw as Record<string, unknown>)[method] !== undefined &&
-    (mw as Record<string, unknown>)[method] !==
-      (TaskMiddleware.prototype as Record<string, unknown>)[method]
+    (mw as unknown as Record<string, unknown>)[method] !== undefined &&
+    (mw as unknown as Record<string, unknown>)[method] !==
+      (TaskMiddleware.prototype as unknown as Record<string, unknown>)[method]
   )
 }
 
@@ -539,6 +804,32 @@ class ComposedTaskMiddleware extends TaskMiddleware {
     for (const mw of this._middlewares) {
       if (overridesMethod(mw, 'onComplete')) {
         mw.onComplete(state)
+      }
+    }
+  }
+
+  async aValidateCompletion(state: Record<string, unknown>): Promise<string | null> {
+    for (const mw of this._middlewares) {
+      if (overridesMethod(mw, 'aValidateCompletion') || overridesMethod(mw, 'validateCompletion')) {
+        const error = await mw.aValidateCompletion(state)
+        if (error) return error
+      }
+    }
+    return null
+  }
+
+  async aOnStart(state: Record<string, unknown>): Promise<void> {
+    for (const mw of this._middlewares) {
+      if (overridesMethod(mw, 'aOnStart') || overridesMethod(mw, 'onStart')) {
+        await mw.aOnStart(state)
+      }
+    }
+  }
+
+  async aOnComplete(state: Record<string, unknown>): Promise<void> {
+    for (const mw of this._middlewares) {
+      if (overridesMethod(mw, 'aOnComplete') || overridesMethod(mw, 'onComplete')) {
+        await mw.aOnComplete(state)
       }
     }
   }

@@ -102,7 +102,7 @@ Only the active task's tools (plus globals and `update_task_status`) are visible
 
 | Hook                                         | Behavior                                                                                                                                                                                                                    |
 | -------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `beforeAgent(state)`                         | Initializes `taskStatuses` in state on first invocation.                                                                                                                                                                    |
+| `beforeAgent(state)`                         | Initializes `taskStatuses` in state. When skills are configured, loads skill metadata from the backend and stores it in state.                                                                                              |
 | `wrapModelCall(request, handler)`            | Appends task status board + active task instruction to system prompt. Filters tools to only the active task's tools + globals + `update_task_status`. Delegates to task-scoped middleware if present.                       |
 | `wrapToolCall(request, handler)`             | Intercepts `update_task_status` — runs `validateCompletion` on the task's scoped middleware before allowing completion. Rejects out-of-scope tool calls. Delegates other tool calls to the active task's scoped middleware. |
 | `afterAgent(state)`                          | Checks if required tasks are complete. If not, returns a nudge message (up to `maxNudges` times).                                                                                                                           |
@@ -169,8 +169,11 @@ class ThreatsMiddleware extends TaskMiddleware {
 | Method                            | When it runs                              | Purpose                                        |
 | --------------------------------- | ----------------------------------------- | ---------------------------------------------- |
 | `validateCompletion(state)`       | Before `complete` transition              | Return error string to reject, `null` to allow |
+| `aValidateCompletion(state)`      | Async version (used by `awrapToolCall`)   | Default delegates to sync `validateCompletion` |
 | `onStart(state)`                  | After successful `in_progress` transition | Side effects (logging, state init)             |
+| `aOnStart(state)`                 | Async version (used by `awrapToolCall`)   | Default delegates to sync `onStart`            |
 | `onComplete(state)`               | After successful `complete` transition    | Side effects (trail capture, cleanup)          |
+| `aOnComplete(state)`              | Async version (used by `awrapToolCall`)   | Default delegates to sync `onComplete`         |
 | `wrapToolCall(request, handler)`  | On every tool call during this task       | Mid-task tool gating / modification            |
 | `wrapModelCall(request, handler)` | On every model call during this task      | Extra prompt injection / request modification  |
 | `tools` _(property)_              | At middleware construction                | Extra tools to register and scope to this task |
@@ -210,31 +213,124 @@ Tasks accept a list of middleware, composed like LangChain's `create_agent(middl
 ```
 
 Composition semantics:
+
 - **Wrap-style hooks** (`wrapModelCall`, `wrapToolCall`): first = outermost wrapper.
 - **`validateCompletion`**: all validators run; first error wins.
 - **`onStart` / `onComplete`**: all fire in order.
 - **`tools`**: merged from all middleware, deduplicated.
 
+## Task-scoped skills
+
+Skills are prompt-injected capabilities loaded from `SKILL.md` files. When configured, skills are scoped per task — just like tools.
+
+`SkillsMiddleware` (in `create_deep_agent`) loads all skills into state. `TaskSteeringMiddleware` filters them per task — no `backend` or `skillSources` needed:
+
+```typescript
+createDeepAgent({
+  backend: myBackend,
+  skills: ['/skills/user/', '/skills/project/'],
+  middleware: [
+    new TaskSteeringMiddleware({
+      tasks: [
+        {
+          name: 'research',
+          instruction: 'Research the topic.',
+          tools: [searchTool],
+          skills: ['web-research', 'citation-format'],
+        },
+        {
+          name: 'write_report',
+          instruction: 'Write the report.',
+          tools: [writeTool],
+          skills: ['report-writing'],
+        },
+      ],
+      globalSkills: ['general-formatting'],
+    }),
+  ],
+})
+```
+
+### How it works
+
+When skills are active, the model sees them in the status block:
+
+```xml
+<task_pipeline>
+  [x] research (complete)
+  [>] write_report (in_progress)
+
+  <current_task name="write_report">
+    Write the report.
+  </current_task>
+
+  <available_skills>
+    - report-writing: Templates and structure for technical reports. Path: /skills/project/report-writing/SKILL.md
+    - general-formatting: Standard formatting guidelines. Path: /skills/user/general-formatting/SKILL.md
+  </available_skills>
+
+  <rules>
+    Required order: research -> write_report
+    Use update_task_status to advance. Do not skip tasks.
+    To use a skill, read its SKILL.md file for full instructions.
+  </rules>
+</task_pipeline>
+```
+
+When skills are active, `read_file` and `ls` are auto-whitelisted in the tool filter so the model can read `SKILL.md` files regardless of which task is active.
+
+## Backend tools passthrough
+
+When the middleware is used alongside other middleware that contribute tools (e.g., filesystem, subagent), those tools get filtered out by tool scoping unless explicitly added to `globalTools` or a task's `tools`. Backend tools passthrough lets known backend tools pass through the filter automatically.
+
+```typescript
+const pipeline = new TaskSteeringMiddleware({
+  tasks: [...],
+  backendToolsPassthrough: true, // whitelist known backend tools
+})
+
+// Inspect the whitelist
+TaskSteeringMiddleware.DEFAULT_BACKEND_TOOLS
+// → Set { 'ls', 'read_file', 'write_file', 'edit_file', 'glob', 'grep',
+//         'execute', 'write_todos', 'task', 'start_async_task', ... }
+
+// Override the whitelist
+new TaskSteeringMiddleware({
+  tasks: [...],
+  backendToolsPassthrough: true,
+  backendTools: new Set(['read_file', 'write_file', 'my_custom_tool']),
+})
+
+// Inspect at runtime
+pipeline.getBackendTools() // → the effective whitelist
+```
+
+No `backend` is required for passthrough — it just whitelists tool names in the filter.
+
 ## Configuration
 
 ```typescript
 const pipeline = new TaskSteeringMiddleware({
-  tasks: [...],              // required — ordered Task list
-  globalTools: [],           // tools available in every task
-  enforceOrder: true,        // require tasks in definition order
-  requiredTasks: ["*"],      // ["*"] = all, null = none, or list of names
-  maxNudges: 3,              // max nudge attempts before allowing exit
-});
+  tasks: [...],                    // required — ordered Task list
+  globalTools: [],                 // tools available in every task
+  enforceOrder: true,              // require tasks in definition order
+  requiredTasks: ['*'],            // ['*'] = all, null = none, or list of names
+  maxNudges: 3,                    // max nudge attempts before allowing exit
+  globalSkills: [],                // skill names available in all tasks
+  backendToolsPassthrough: false,  // whitelist known backend tools
+  backendTools: null,              // override DEFAULT_BACKEND_TOOLS
+})
 ```
 
 ### Task fields
 
-| Field         | Required | Description                                             |
-| ------------- | -------- | ------------------------------------------------------- |
-| `name`        | yes      | Unique identifier (used in prompts and state).          |
-| `instruction` | yes      | Injected into system prompt when this task is active.   |
-| `tools`       | yes      | Tools visible when this task is `IN_PROGRESS`.          |
+| Field         | Required | Description                                                                                                                      |
+| ------------- | -------- | -------------------------------------------------------------------------------------------------------------------------------- |
+| `name`        | yes      | Unique identifier (used in prompts and state).                                                                                   |
+| `instruction` | yes      | Injected into system prompt when this task is active.                                                                            |
+| `tools`       | yes      | Tools visible when this task is `IN_PROGRESS`.                                                                                   |
 | `middleware`  | no       | Scoped middleware — a `TaskMiddleware`, agent middleware object (auto-wrapped), or a list of them. Only active during this task. |
+| `skills`      | no       | Skill names available when this task is `IN_PROGRESS`. Requires `backend` + `skillSources` on the middleware.                    |
 
 ## Agent integration
 

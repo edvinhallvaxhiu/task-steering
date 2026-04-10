@@ -1,5 +1,6 @@
 """TaskSteeringMiddleware — implicit state machine for LangChain v1 agents."""
 
+import copy
 import typing
 import warnings
 from collections.abc import Awaitable, Callable
@@ -18,7 +19,7 @@ from ._hooks import WRAP_HOOK_PAIRS, overrides_base
 from .types import Task, TaskMiddleware, TaskStatus, TaskSteeringState
 
 _TRANSITION_TOOL_NAME = "update_task_status"
-_REQUIRE_ALL = ["*"]
+_REQUIRE_ALL = ("*",)
 
 
 def _overrides_task(middleware: TaskMiddleware, method_name: str) -> bool:
@@ -118,6 +119,28 @@ class _ComposedTaskMiddleware(TaskMiddleware):
             if _overrides_task(mw, "on_complete"):
                 mw.on_complete(state)
 
+    async def avalidate_completion(self, state):
+        for mw in self._middlewares:
+            if _overrides_task(mw, "avalidate_completion") or _overrides_task(
+                mw, "validate_completion"
+            ):
+                error = await mw.avalidate_completion(state)
+                if error:
+                    return error
+        return None
+
+    async def aon_start(self, state):
+        for mw in self._middlewares:
+            if _overrides_task(mw, "aon_start") or _overrides_task(mw, "on_start"):
+                await mw.aon_start(state)
+
+    async def aon_complete(self, state):
+        for mw in self._middlewares:
+            if _overrides_task(mw, "aon_complete") or _overrides_task(
+                mw, "on_complete"
+            ):
+                await mw.aon_complete(state)
+
 
 def _is_valid_middleware(mw: Any) -> bool:
     """Check if an object is a valid middleware (TaskMiddleware or AgentMiddleware)."""
@@ -185,13 +208,45 @@ class TaskSteeringMiddleware(AgentMiddleware[TaskSteeringState]):
       (``TaskMiddleware.validate_completion``).
     - Mid-task enforcement via task-scoped middleware hooks
       (``wrap_tool_call``, ``wrap_model_call``).
+    - Per-task skill scoping — skills from ``SKILL.md`` files are
+      filtered to the active task (requires a backend).
+    - Backend tools passthrough — known backend tools can be
+      whitelisted to pass through the tool filter.
 
     Args:
         tasks: Ordered list of :class:`Task` definitions.
         global_tools: Tools available regardless of which task is active.
         enforce_order: If ``True`` (default), tasks must be completed in
             the order they are defined.
+        backend_tools_passthrough: If ``True``, known backend tools
+            pass through the tool filter on all tasks.
+        backend_tools: Override the default backend tools whitelist.
+            ``None`` uses :attr:`DEFAULT_BACKEND_TOOLS`.
+        global_skills: Skill names available regardless of active task.
     """
+
+    DEFAULT_BACKEND_TOOLS: frozenset[str] = frozenset(
+        {
+            # FilesystemMiddleware
+            "ls",
+            "read_file",
+            "write_file",
+            "edit_file",
+            "glob",
+            "grep",
+            "execute",
+            # TodoListMiddleware
+            "write_todos",
+            # SubAgentMiddleware
+            "task",
+            # AsyncSubAgentMiddleware
+            "start_async_task",
+            "check_async_task",
+            "update_async_task",
+            "cancel_async_task",
+            "list_async_tasks",
+        }
+    )
 
     state_schema = TaskSteeringState
 
@@ -202,6 +257,9 @@ class TaskSteeringMiddleware(AgentMiddleware[TaskSteeringState]):
         enforce_order: bool = True,
         required_tasks: list[str] | None = _REQUIRE_ALL,
         max_nudges: int = 3,
+        backend_tools_passthrough: bool = False,
+        backend_tools: set[str] | None = None,
+        global_skills: list[str] | None = None,
     ) -> None:
         super().__init__()
         if not tasks:
@@ -212,9 +270,11 @@ class TaskSteeringMiddleware(AgentMiddleware[TaskSteeringState]):
         if dupes:
             raise ValueError(f"Duplicate task names: {dupes}")
 
-        # Normalize middleware: auto-wrap raw AgentMiddleware, compose lists
+        # Normalize middleware on shallow copies to avoid mutating the caller's objects
+        tasks = [copy.copy(t) for t in tasks]
         for task in tasks:
             task.middleware = _normalize_middleware(task.middleware)
+            task.tools = list(task.tools)
 
         self._tasks = tasks
         self._task_order: list[str] = [t.name for t in tasks]
@@ -223,9 +283,29 @@ class TaskSteeringMiddleware(AgentMiddleware[TaskSteeringState]):
         self._enforce_order = enforce_order
         self._max_nudges = max_nudges
 
+        # ── Backend tools passthrough ────────────────────────────
+        self._backend_tools = (
+            frozenset(backend_tools)
+            if backend_tools is not None
+            else self.DEFAULT_BACKEND_TOOLS
+        )
+        self._backend_tools_passthrough = backend_tools_passthrough
+
+        # ── Task-scoped skills ───────────────────────────────────
+        # Skills are active if any task defines skills or global_skills are set.
+        # Skill metadata comes from state (e.g. loaded by SkillsMiddleware in
+        # create_deep_agent). This middleware only filters, never loads.
+        self._global_skills: list[str] = list(global_skills or [])
+        self._skills_active = bool(any(t.skills for t in tasks) or self._global_skills)
+        self._skill_required_tools: frozenset[str] = (
+            frozenset({"read_file", "ls"}) if self._skills_active else frozenset()
+        )
+
         # Resolve required_tasks
-        if required_tasks is not None and "*" in required_tasks:
+        if required_tasks is _REQUIRE_ALL:
             self._required_tasks: set[str] = {t.name for t in tasks}
+        elif required_tasks is not None and "*" in required_tasks:
+            self._required_tasks = {t.name for t in tasks}
         elif required_tasks is not None:
             unknown = set(required_tasks) - set(names)
             if unknown:
@@ -267,12 +347,15 @@ class TaskSteeringMiddleware(AgentMiddleware[TaskSteeringState]):
     def before_agent(
         self, state: TaskSteeringState, runtime: Runtime
     ) -> dict[str, Any] | None:
-        """Initialize task_statuses on first invocation."""
+        """Initialize task_statuses and load skills on first invocation."""
+        updates: dict[str, Any] = {}
+
         if state.get("task_statuses") is None:
-            return {
-                "task_statuses": {t.name: TaskStatus.PENDING.value for t in self._tasks}
+            updates["task_statuses"] = {
+                t.name: TaskStatus.PENDING.value for t in self._tasks
             }
-        return None
+
+        return updates or None
 
     @hook_config(can_jump_to=["model"])
     def after_agent(
@@ -303,6 +386,9 @@ class TaskSteeringMiddleware(AgentMiddleware[TaskSteeringState]):
                 f"You have not completed the following required tasks: "
                 f"{task_list}. Please continue."
             ),
+            additional_kwargs={
+                "task_steering": {"kind": "nudge", "incomplete_tasks": incomplete},
+            },
         )
 
         return {
@@ -335,12 +421,26 @@ class TaskSteeringMiddleware(AgentMiddleware[TaskSteeringState]):
         statuses = self._get_statuses(request.state)
         active_name = self._active_task(statuses)
 
-        block = self._render_status_block(statuses, active_name)
+        block = self._render_status_block(statuses, active_name, state=request.state)
         existing = (
             list(request.system_message.content_blocks)
             if request.system_message is not None
             else []
         )
+
+        # Strip SkillsMiddleware's global prompt injection — we replace it
+        # with per-task scoped skills in the pipeline block.
+        if self._skills_active:
+            existing = [
+                b
+                for b in existing
+                if not (
+                    isinstance(b, dict)
+                    and b.get("type") == "text"
+                    and "## Skills System" in (b.get("text") or "")
+                )
+            ]
+
         new_content = existing + [{"type": "text", "text": block}]
 
         allowed_names = self._allowed_tool_names(active_name)
@@ -355,14 +455,25 @@ class TaskSteeringMiddleware(AgentMiddleware[TaskSteeringState]):
     def _validate_transition(
         self, request: ToolCallRequest, statuses: dict[str, str]
     ) -> ToolMessage | None:
-        """Run completion validation. Returns a rejection ToolMessage or None."""
+        """Pre-handler validation for transitions. Returns a rejection ToolMessage or None."""
         args = request.tool_call["args"]
         task_name = args.get("task")
         target = args.get("status")
 
+        if target == TaskStatus.IN_PROGRESS.value:
+            already_active = self._active_task(statuses)
+            if already_active:
+                return ToolMessage(
+                    content=(
+                        f"Cannot start '{task_name}': '{already_active}' is already "
+                        f"in progress. Complete it first."
+                    ),
+                    tool_call_id=request.tool_call["id"],
+                )
+
         if target == TaskStatus.COMPLETE.value and task_name in self._task_map:
             task_mw = self._get_task_middleware(task_name)
-            if task_mw and self._overrides_task(task_mw, "validate_completion"):
+            if task_mw and _overrides_task(task_mw, "validate_completion"):
                 error = task_mw.validate_completion(request.state)
                 if error:
                     return ToolMessage(
@@ -401,6 +512,68 @@ class TaskSteeringMiddleware(AgentMiddleware[TaskSteeringState]):
             task_mw.on_start(post_state)
         elif target == TaskStatus.COMPLETE.value:
             task_mw.on_complete(post_state)
+
+    async def _avalidate_transition(
+        self, request: ToolCallRequest, statuses: dict[str, str]
+    ) -> ToolMessage | None:
+        """Async pre-handler validation for transitions."""
+        args = request.tool_call["args"]
+        task_name = args.get("task")
+        target = args.get("status")
+
+        if target == TaskStatus.IN_PROGRESS.value:
+            already_active = self._active_task(statuses)
+            if already_active:
+                return ToolMessage(
+                    content=(
+                        f"Cannot start '{task_name}': '{already_active}' is already "
+                        f"in progress. Complete it first."
+                    ),
+                    tool_call_id=request.tool_call["id"],
+                )
+
+        if target == TaskStatus.COMPLETE.value and task_name in self._task_map:
+            task_mw = self._get_task_middleware(task_name)
+            if task_mw and (
+                _overrides_task(task_mw, "avalidate_completion")
+                or _overrides_task(task_mw, "validate_completion")
+            ):
+                error = await task_mw.avalidate_completion(request.state)
+                if error:
+                    return ToolMessage(
+                        content=(
+                            f"Cannot complete '{task_name}': {error}. "
+                            f"Address the issues then try again."
+                        ),
+                        tool_call_id=request.tool_call["id"],
+                    )
+        return None
+
+    async def _afire_lifecycle_hooks(
+        self,
+        request: ToolCallRequest,
+        result: ToolMessage | Command,
+        statuses: dict[str, str],
+    ) -> None:
+        """Async version of _fire_lifecycle_hooks."""
+        args = request.tool_call["args"]
+        task_name = args.get("task")
+        target = args.get("status")
+
+        if not isinstance(result, Command) or task_name not in self._task_map:
+            return
+
+        task_mw = self._get_task_middleware(task_name)
+        if not task_mw:
+            return
+
+        updated_statuses = {**statuses, task_name: target}
+        post_state = {**request.state, "task_statuses": updated_statuses}
+
+        if target == TaskStatus.IN_PROGRESS.value:
+            await task_mw.aon_start(post_state)
+        elif target == TaskStatus.COMPLETE.value:
+            await task_mw.aon_complete(post_state)
 
     def _gate_tool(
         self, request: ToolCallRequest, active_name: str | None
@@ -485,12 +658,12 @@ class TaskSteeringMiddleware(AgentMiddleware[TaskSteeringState]):
         active_name = self._active_task(statuses)
 
         if request.tool_call["name"] == _TRANSITION_TOOL_NAME:
-            rejection = self._validate_transition(request, statuses)
+            rejection = await self._avalidate_transition(request, statuses)
             if rejection:
                 return rejection
 
             result = await handler(request)
-            self._fire_lifecycle_hooks(request, result, statuses)
+            await self._afire_lifecycle_hooks(request, result, statuses)
             return result
 
         gate = self._gate_tool(request, active_name)
@@ -559,11 +732,6 @@ class TaskSteeringMiddleware(AgentMiddleware[TaskSteeringState]):
         """Check if a middleware subclass actually overrides a hook method."""
         return overrides_base(middleware, method_name)
 
-    @staticmethod
-    def _overrides_task(middleware: TaskMiddleware, method_name: str) -> bool:
-        """Check if a TaskMiddleware subclass overrides a TaskMiddleware hook."""
-        return _overrides_task(middleware, method_name)
-
     def _get_task_middleware(self, task_name: str | None) -> TaskMiddleware | None:
         if task_name is None:
             return None
@@ -579,9 +747,31 @@ class TaskSteeringMiddleware(AgentMiddleware[TaskSteeringState]):
             # Include tools contributed by task middleware (e.g. adapters)
             if task.middleware and hasattr(task.middleware, "tools"):
                 names.update(t.name for t in (task.middleware.tools or []))
+        if self._backend_tools_passthrough:
+            names.update(self._backend_tools)
+        if self._skills_active:
+            names.update(self._skill_required_tools)
         return names
 
-    def _render_status_block(self, statuses: dict[str, str], active: str | None) -> str:
+    def _allowed_skill_names(self, active_name: str | None) -> set[str]:
+        """Return skill names visible for the given active task."""
+        names = set(self._global_skills)
+        if active_name:
+            task = self._task_map[active_name]
+            if task.skills:
+                names.update(task.skills)
+        return names
+
+    def get_backend_tools(self) -> frozenset[str]:
+        """Return the effective backend tools whitelist."""
+        return self._backend_tools
+
+    def _render_status_block(
+        self,
+        statuses: dict[str, str],
+        active: str | None,
+        state: dict | None = None,
+    ) -> str:
         icons = {
             TaskStatus.PENDING.value: "[ ]",
             TaskStatus.IN_PROGRESS.value: "[>]",
@@ -591,18 +781,37 @@ class TaskSteeringMiddleware(AgentMiddleware[TaskSteeringState]):
         lines = ["\n<task_pipeline>"]
         for t in self._tasks:
             s = statuses[t.name]
-            lines.append(f"  {icons[s]} {t.name} ({s})")
+            lines.append(f"  {icons.get(s, '[?]')} {t.name} ({s})")
 
         if active:
             lines.append(f'\n  <current_task name="{active}">')
             lines.append(f"    {self._task_map[active].instruction}")
             lines.append("  </current_task>")
 
-        if self._enforce_order:
-            order_str = " -> ".join(self._task_order)
+        # ── Skill rendering ──────────────────────────────────────
+        has_visible_skills = False
+        if self._skills_active and state is not None:
+            all_skills = state.get("skills_metadata") or []
+            allowed_names = self._allowed_skill_names(active)
+            visible_skills = [s for s in all_skills if s["name"] in allowed_names]
+            if visible_skills:
+                has_visible_skills = True
+                lines.append("\n  <available_skills>")
+                for skill in visible_skills:
+                    desc = skill.get("description", "No description.")
+                    lines.append(f"    - {skill['name']}: {desc} Path: {skill['path']}")
+                lines.append("  </available_skills>")
+
+        if self._enforce_order or has_visible_skills:
             lines.append("\n  <rules>")
-            lines.append(f"    Required order: {order_str}")
+            if self._enforce_order:
+                order_str = " -> ".join(self._task_order)
+                lines.append(f"    Required order: {order_str}")
             lines.append("    Use update_task_status to advance. Do not skip tasks.")
+            if has_visible_skills:
+                lines.append(
+                    "    To use a skill, read its SKILL.md file for full instructions."
+                )
             lines.append("  </rules>")
 
         lines.append("</task_pipeline>")
@@ -646,6 +855,9 @@ class TaskSteeringMiddleware(AgentMiddleware[TaskSteeringState]):
             current = statuses[task]
 
             # Enforce valid transitions: pending -> in_progress -> complete
+            if current == TaskStatus.COMPLETE.value:
+                return f"Task '{task}' is already complete."
+
             valid_next = {
                 TaskStatus.PENDING.value: TaskStatus.IN_PROGRESS.value,
                 TaskStatus.IN_PROGRESS.value: TaskStatus.COMPLETE.value,
@@ -654,7 +866,7 @@ class TaskSteeringMiddleware(AgentMiddleware[TaskSteeringState]):
             if expected != status:
                 return (
                     f"Cannot transition '{task}' from '{current}' to "
-                    f"'{status}'. Expected next: '{expected or 'N/A'}'."
+                    f"'{status}'. Expected next: '{expected}'."
                 )
 
             # Enforce ordering: all prior tasks must be complete
@@ -674,6 +886,7 @@ class TaskSteeringMiddleware(AgentMiddleware[TaskSteeringState]):
             return Command(
                 update={
                     "task_statuses": statuses,
+                    "nudge_count": 0,
                     "messages": [
                         ToolMessage(
                             f"Task '{task}' -> {status}.\n\n{display}",

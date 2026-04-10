@@ -992,6 +992,26 @@ class TestAfterAgent:
         assert "b" in result["messages"][0].content
         assert "required tasks" in result["messages"][0].content
 
+    def test_nudge_message_has_task_steering_metadata(self):
+        tasks = [
+            Task(name="a", instruction="A", tools=[tool_a]),
+            Task(name="b", instruction="B", tools=[tool_b]),
+        ]
+        mw = TaskSteeringMiddleware(tasks=tasks)
+
+        state = {
+            "messages": [],
+            "task_statuses": {"a": "complete", "b": "pending"},
+        }
+
+        result = mw.after_agent(state, runtime=None)
+        msg = result["messages"][0]
+        meta = msg.additional_kwargs.get("task_steering")
+        assert meta is not None
+        assert meta["kind"] == "nudge"
+        assert "b" in meta["incomplete_tasks"]
+        assert "a" not in meta["incomplete_tasks"]
+
     def test_no_nudge_when_all_complete(self):
         tasks = [
             Task(name="a", instruction="A", tools=[tool_a]),
@@ -1425,6 +1445,255 @@ class TestAsyncHooks:
 
 
 # ════════════════════════════════════════════════════════════
+# Async lifecycle hooks — avalidate_completion / aon_start / aon_complete
+# ════════════════════════════════════════════════════════════
+
+
+class TestAsyncLifecycleHooks:
+    @pytest.mark.asyncio
+    async def test_async_validate_completion_called_in_awrap(self):
+        """awrap_tool_call should use avalidate_completion for async validation."""
+
+        class AsyncValidator(TaskMiddleware):
+            def __init__(self):
+                super().__init__()
+                self.async_called = False
+
+            async def avalidate_completion(self, state):
+                self.async_called = True
+                return "async rejection"
+
+        validator = AsyncValidator()
+        tasks = [Task(name="a", instruction="A", tools=[], middleware=validator)]
+        mw = TaskSteeringMiddleware(tasks=tasks)
+
+        request = MockToolCallRequest(
+            tool_call={
+                "name": "update_task_status",
+                "args": {"task": "a", "status": "complete"},
+                "id": "call-1",
+            },
+            state={"task_statuses": {"a": "in_progress"}},
+        )
+
+        async def async_handler(r):
+            return MagicMock()
+
+        result = await mw.awrap_tool_call(request, async_handler)
+        assert isinstance(result, ToolMessage)
+        assert "async rejection" in result.content
+        assert validator.async_called is True
+
+    @pytest.mark.asyncio
+    async def test_sync_validate_completion_used_as_fallback(self):
+        """awrap_tool_call should fall back to sync validate_completion via default avalidate_completion."""
+        tasks = [
+            Task(
+                name="a",
+                instruction="A",
+                tools=[],
+                middleware=RejectCompletionMiddleware("sync rejection"),
+            ),
+        ]
+        mw = TaskSteeringMiddleware(tasks=tasks)
+
+        request = MockToolCallRequest(
+            tool_call={
+                "name": "update_task_status",
+                "args": {"task": "a", "status": "complete"},
+                "id": "call-1",
+            },
+            state={"task_statuses": {"a": "in_progress"}},
+        )
+
+        async def async_handler(r):
+            return MagicMock()
+
+        result = await mw.awrap_tool_call(request, async_handler)
+        assert isinstance(result, ToolMessage)
+        assert "sync rejection" in result.content
+
+    @pytest.mark.asyncio
+    async def test_async_on_start_called_in_awrap(self):
+        """awrap_tool_call should call aon_start on successful in_progress transition."""
+        from langgraph.types import Command
+
+        class AsyncLifecycleSpy(TaskMiddleware):
+            def __init__(self):
+                super().__init__()
+                self.async_started = False
+                self.sync_started = False
+
+            def on_start(self, state):
+                self.sync_started = True
+
+            async def aon_start(self, state):
+                self.async_started = True
+
+        spy = AsyncLifecycleSpy()
+        tasks = [Task(name="a", instruction="A", tools=[], middleware=spy)]
+        mw = TaskSteeringMiddleware(tasks=tasks)
+
+        request = MockToolCallRequest(
+            tool_call={
+                "name": "update_task_status",
+                "args": {"task": "a", "status": "in_progress"},
+                "id": "call-1",
+            },
+            state={"task_statuses": {"a": "pending"}},
+        )
+
+        async def async_handler(r):
+            return Command(update={})
+
+        await mw.awrap_tool_call(request, async_handler)
+        assert spy.async_started is True
+        assert spy.sync_started is False
+
+    @pytest.mark.asyncio
+    async def test_async_on_complete_called_in_awrap(self):
+        """awrap_tool_call should call aon_complete on successful complete transition."""
+        from langgraph.types import Command
+
+        class AsyncLifecycleSpy(TaskMiddleware):
+            def __init__(self):
+                super().__init__()
+                self.async_completed = False
+                self.sync_completed = False
+
+            def on_complete(self, state):
+                self.sync_completed = True
+
+            async def aon_complete(self, state):
+                self.async_completed = True
+
+        spy = AsyncLifecycleSpy()
+        tasks = [Task(name="a", instruction="A", tools=[], middleware=spy)]
+        mw = TaskSteeringMiddleware(tasks=tasks)
+
+        request = MockToolCallRequest(
+            tool_call={
+                "name": "update_task_status",
+                "args": {"task": "a", "status": "complete"},
+                "id": "call-1",
+            },
+            state={"task_statuses": {"a": "in_progress"}},
+        )
+
+        async def async_handler(r):
+            return Command(update={})
+
+        await mw.awrap_tool_call(request, async_handler)
+        assert spy.async_completed is True
+        assert spy.sync_completed is False
+
+    @pytest.mark.asyncio
+    async def test_sync_only_hooks_work_in_async_path(self):
+        """Middlewares with only sync hooks should still work in awrap_tool_call via defaults."""
+        from langgraph.types import Command
+
+        class SyncOnlySpy(TaskMiddleware):
+            def __init__(self):
+                super().__init__()
+                self.started = False
+
+            def on_start(self, state):
+                self.started = True
+
+        spy = SyncOnlySpy()
+        tasks = [Task(name="a", instruction="A", tools=[], middleware=spy)]
+        mw = TaskSteeringMiddleware(tasks=tasks)
+
+        request = MockToolCallRequest(
+            tool_call={
+                "name": "update_task_status",
+                "args": {"task": "a", "status": "in_progress"},
+                "id": "call-1",
+            },
+            state={"task_statuses": {"a": "pending"}},
+        )
+
+        async def async_handler(r):
+            return Command(update={})
+
+        await mw.awrap_tool_call(request, async_handler)
+        assert spy.started is True
+
+    @pytest.mark.asyncio
+    async def test_composed_async_validate_completion(self):
+        """Composed middleware should chain avalidate_completion."""
+
+        class AsyncFail(TaskMiddleware):
+            async def avalidate_completion(self, state):
+                return "async error from first"
+
+        class AsyncAllow(TaskMiddleware):
+            async def avalidate_completion(self, state):
+                return None
+
+        tasks = [
+            Task(
+                name="a",
+                instruction="A",
+                tools=[],
+                middleware=[AsyncFail(), AsyncAllow()],
+            )
+        ]
+        mw = TaskSteeringMiddleware(tasks=tasks)
+
+        request = MockToolCallRequest(
+            tool_call={
+                "name": "update_task_status",
+                "args": {"task": "a", "status": "complete"},
+                "id": "call-1",
+            },
+            state={"task_statuses": {"a": "in_progress"}},
+        )
+
+        async def async_handler(r):
+            return MagicMock()
+
+        result = await mw.awrap_tool_call(request, async_handler)
+        assert isinstance(result, ToolMessage)
+        assert "async error from first" in result.content
+
+    @pytest.mark.asyncio
+    async def test_composed_async_lifecycle_all_fire(self):
+        """Composed middleware should fire all aon_start hooks."""
+        from langgraph.types import Command
+
+        started = []
+
+        class Hook1(TaskMiddleware):
+            async def aon_start(self, state):
+                started.append("hook1")
+
+        class Hook2(TaskMiddleware):
+            async def aon_start(self, state):
+                started.append("hook2")
+
+        tasks = [
+            Task(name="a", instruction="A", tools=[], middleware=[Hook1(), Hook2()])
+        ]
+        mw = TaskSteeringMiddleware(tasks=tasks)
+
+        request = MockToolCallRequest(
+            tool_call={
+                "name": "update_task_status",
+                "args": {"task": "a", "status": "in_progress"},
+                "id": "call-1",
+            },
+            state={"task_statuses": {"a": "pending"}},
+        )
+
+        async def async_handler(r):
+            return Command(update={})
+
+        await mw.awrap_tool_call(request, async_handler)
+        assert started == ["hook1", "hook2"]
+
+
+# ════════════════════════════════════════════════════════════
 # Middleware list composition
 # ════════════════════════════════════════════════════════════
 
@@ -1810,3 +2079,181 @@ class TestAutoWrapping:
         )
         mw.wrap_model_call(request, lambda r: MagicMock())
         assert duck.called is True
+
+
+# ════════════════════════════════════════════════════════════
+# Single active task enforcement
+# ════════════════════════════════════════════════════════════
+
+
+class TestSingleActiveTask:
+    def test_rejects_concurrent_in_progress_ordered(self):
+        """Cannot start a second task while one is already in_progress (enforce_order=True)."""
+        tasks = [
+            Task(name="a", instruction="A", tools=[tool_a]),
+            Task(name="b", instruction="B", tools=[tool_b]),
+        ]
+        mw = TaskSteeringMiddleware(tasks=tasks)
+
+        request = MockToolCallRequest(
+            tool_call={
+                "name": "update_task_status",
+                "args": {"task": "b", "status": "in_progress"},
+                "id": "call-1",
+            },
+            state={"task_statuses": {"a": "in_progress", "b": "pending"}},
+        )
+
+        handler = MagicMock()
+        result = mw.wrap_tool_call(request, handler)
+
+        handler.assert_not_called()
+        assert isinstance(result, ToolMessage)
+        assert "already in progress" in result.content
+
+    def test_rejects_concurrent_in_progress_unordered(self):
+        """Cannot start a second task even when enforce_order=False."""
+        tasks = [
+            Task(name="a", instruction="A", tools=[tool_a]),
+            Task(name="b", instruction="B", tools=[tool_b]),
+        ]
+        mw = TaskSteeringMiddleware(tasks=tasks, enforce_order=False)
+
+        request = MockToolCallRequest(
+            tool_call={
+                "name": "update_task_status",
+                "args": {"task": "b", "status": "in_progress"},
+                "id": "call-1",
+            },
+            state={"task_statuses": {"a": "in_progress", "b": "pending"}},
+        )
+
+        handler = MagicMock()
+        result = mw.wrap_tool_call(request, handler)
+
+        handler.assert_not_called()
+        assert isinstance(result, ToolMessage)
+        assert "already in progress" in result.content
+        assert "'a'" in result.content
+
+    def test_allows_start_when_no_active(self):
+        """Can start a task when no other is in_progress."""
+        from langgraph.types import Command
+
+        tasks = [
+            Task(name="a", instruction="A", tools=[tool_a]),
+            Task(name="b", instruction="B", tools=[tool_b]),
+        ]
+        mw = TaskSteeringMiddleware(tasks=tasks, enforce_order=False)
+
+        request = MockToolCallRequest(
+            tool_call={
+                "name": "update_task_status",
+                "args": {"task": "a", "status": "in_progress"},
+                "id": "call-1",
+            },
+            state={"task_statuses": {"a": "pending", "b": "pending"}},
+        )
+
+        handler = MagicMock(return_value=Command(update={}))
+        mw.wrap_tool_call(request, handler)
+        handler.assert_called_once()
+
+    def test_allows_start_after_previous_complete(self):
+        """Can start a task once the previous in_progress task is completed."""
+        from langgraph.types import Command
+
+        tasks = [
+            Task(name="a", instruction="A", tools=[tool_a]),
+            Task(name="b", instruction="B", tools=[tool_b]),
+        ]
+        mw = TaskSteeringMiddleware(tasks=tasks)
+
+        request = MockToolCallRequest(
+            tool_call={
+                "name": "update_task_status",
+                "args": {"task": "b", "status": "in_progress"},
+                "id": "call-1",
+            },
+            state={"task_statuses": {"a": "complete", "b": "pending"}},
+        )
+
+        handler = MagicMock(return_value=Command(update={}))
+        mw.wrap_tool_call(request, handler)
+        handler.assert_called_once()
+
+
+# ════════════════════════════════════════════════════════════
+# Nudge count reset on task transition
+# ════════════════════════════════════════════════════════════
+
+
+class TestNudgeCountReset:
+    def test_nudge_count_resets_on_start(self):
+        """nudge_count should reset to 0 when a task transitions to in_progress."""
+        from langgraph.types import Command
+
+        tasks = [Task(name="a", instruction="A", tools=[tool_a])]
+        mw = TaskSteeringMiddleware(tasks=tasks)
+
+        request = MockToolCallRequest(
+            tool_call={
+                "name": "update_task_status",
+                "args": {"task": "a", "status": "in_progress"},
+                "id": "call-1",
+            },
+            state={"task_statuses": {"a": "pending"}, "nudge_count": 5},
+        )
+
+        handler = MagicMock(return_value=Command(update={}))
+        result = mw.wrap_tool_call(request, handler)
+
+        # The handler is called — get the actual transition tool result
+        handler.assert_called_once()
+
+    def test_nudge_count_resets_on_complete(self):
+        """nudge_count should reset to 0 when a task transitions to complete."""
+        from langgraph.types import Command
+
+        tasks = [
+            Task(name="a", instruction="A", tools=[tool_a]),
+            Task(name="b", instruction="B", tools=[tool_b]),
+        ]
+        mw = TaskSteeringMiddleware(tasks=tasks)
+
+        request = MockToolCallRequest(
+            tool_call={
+                "name": "update_task_status",
+                "args": {"task": "a", "status": "complete"},
+                "id": "call-1",
+            },
+            state={
+                "task_statuses": {"a": "in_progress", "b": "pending"},
+                "nudge_count": 3,
+            },
+        )
+
+        handler = MagicMock(return_value=Command(update={}))
+        result = mw.wrap_tool_call(request, handler)
+        handler.assert_called_once()
+
+    def test_nudge_count_survives_in_state(self):
+        """nudge_count persists in state for checkpointer recovery."""
+        tasks = [Task(name="a", instruction="A", tools=[tool_a])]
+        mw = TaskSteeringMiddleware(tasks=tasks, max_nudges=3)
+
+        # Simulate state recovered from checkpoint with nudge_count=2
+        state = {
+            "messages": [],
+            "task_statuses": {"a": "pending"},
+            "nudge_count": 2,
+        }
+
+        result = mw.after_agent(state, runtime=None)
+        assert result is not None
+        assert result["nudge_count"] == 3
+
+        # Next call should stop nudging
+        state["nudge_count"] = 3
+        result = mw.after_agent(state, runtime=None)
+        assert result is None
