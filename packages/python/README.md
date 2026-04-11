@@ -121,7 +121,7 @@ Only the active task's tools (plus globals and `update_task_status`) are visible
 
 | Hook | Behavior |
 |---|---|
-| `before_agent` | Initializes `task_statuses` in state. When skills are configured, loads skill metadata from the backend and stores it in state. |
+| `before_agent` | Initializes `task_statuses` in state. |
 | `wrap_model_call` | Appends task status board + active task instruction to system prompt. Filters tools to only the active task's tools + globals + `update_task_status`. Delegates to task-scoped middleware if present. |
 | `wrap_tool_call` | Intercepts `update_task_status` — runs `validate_completion` on the task's scoped middleware before allowing completion. Rejects out-of-scope tool calls. Delegates other tool calls to the active task's scoped middleware. |
 | `after_agent` | Checks if required tasks are complete. If not, nudges the agent with a `HumanMessage` and jumps back to the model (up to `max_nudges` times). |
@@ -293,7 +293,7 @@ The nudge mechanism uses the `after_agent` hook with `jump_to: "model"` to re-en
 
 Skills are prompt-injected capabilities loaded from `SKILL.md` files. When configured, skills are scoped per task — just like tools.
 
-`SkillsMiddleware` (in `create_deep_agent`) loads all skills into state. `TaskSteeringMiddleware` filters them per task — no `backend` or `skill_sources` needed:
+`SkillsMiddleware` (in `create_deep_agent`) loads all skills into state. `TaskSteeringMiddleware` filters them per task:
 
 ```python
 agent = create_deep_agent(
@@ -339,7 +339,7 @@ When skills are active, the model sees them in the status block:
 </task_pipeline>
 ```
 
-When skills are active, `read_file` and `ls` are auto-whitelisted in the tool filter so the model can read `SKILL.md` files regardless of which task is active.
+When skills are active, `read_file` and `ls` are auto-whitelisted in the tool filter for any task that has skills (its own or via `global_skills`) so the model can read `SKILL.md` files.
 
 ## Backend tools passthrough
 
@@ -382,7 +382,6 @@ No `backend` is required for passthrough — it just whitelists tool names in th
 | `backend_tools_passthrough` | `False` | Whitelist known backend tools through the tool filter. |
 | `backend_tools` | `None` | Override `DEFAULT_BACKEND_TOOLS`. `None` uses the built-in set. |
 | `global_skills` | `None` | Skill names available regardless of active task. |
-| `skill_sources` | `None` | Backend paths to scan for `SKILL.md` files. |
 
 ### Task fields
 
@@ -392,7 +391,7 @@ No `backend` is required for passthrough — it just whitelists tool names in th
 | `instruction` | yes | Injected into system prompt when this task is active. |
 | `tools` | yes | Tools visible when this task is `IN_PROGRESS`. |
 | `middleware` | no | Scoped middleware — a `TaskMiddleware`, `AgentMiddleware` (auto-wrapped), or a list of them. Only active during this task. |
-| `skills` | no | Skill names available when this task is `IN_PROGRESS`. Requires `backend` + `skill_sources` on the middleware. |
+| `skills` | no | Skill names available when this task is `IN_PROGRESS`. Skill metadata comes from state (loaded by `SkillsMiddleware`). |
 
 ## Composability
 

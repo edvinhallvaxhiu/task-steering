@@ -191,7 +191,7 @@ export class TaskSteeringMiddleware {
   // ── Node-style hooks ──────────────────────────────────
 
   /**
-   * Initialize task_statuses and load skills on first invocation.
+   * Initialize taskStatuses on first invocation.
    * Returns state updates, or null if already initialized.
    */
   beforeAgent(state: TaskSteeringState): Record<string, unknown> | null {
@@ -269,7 +269,7 @@ export class TaskSteeringMiddleware {
 
     const newContent: ContentBlock[] = [...existingBlocks, { type: 'text', text: block }]
 
-    const allowedNames = this._allowedToolNames(activeName)
+    const allowedNames = this._allowedToolNames(activeName, request.state)
     const scoped = request.tools.filter((t) => allowedNames.has(t.name))
 
     const modified = request.override({
@@ -303,7 +303,7 @@ export class TaskSteeringMiddleware {
 
   /** Reject tool calls not in scope for the active task. */
   private _gateTool(request: ToolCallRequest, activeName: string | null): ToolMessageResult | null {
-    const allowed = this._allowedToolNames(activeName)
+    const allowed = this._allowedToolNames(activeName, request.state)
     if (!allowed.has(request.toolCall.name)) {
       return {
         content: `Tool '${request.toolCall.name}' is not available for the current task.`,
@@ -513,7 +513,7 @@ export class TaskSteeringMiddleware {
   }
 
   /** @internal */
-  _allowedToolNames(activeName: string | null): Set<string> {
+  _allowedToolNames(activeName: string | null, state?: Record<string, unknown>): Set<string> {
     const names = new Set<string>([TRANSITION_TOOL_NAME])
     for (const t of this._globalTools) names.add(t.name)
     if (activeName) {
@@ -535,7 +535,19 @@ export class TaskSteeringMiddleware {
 
     // Skills auto-whitelist
     if (this._skillsActive) {
-      for (const t of this._skillRequiredTools) names.add(t)
+      const allowedSkills = this._allowedSkillNames(activeName)
+      if (allowedSkills.size > 0) {
+        for (const t of this._skillRequiredTools) names.add(t)
+        // Whitelist tools declared by visible skills (allowedTools frontmatter)
+        if (state != null) {
+          const allSkills = (state.skillsMetadata as SkillMetadata[] | undefined) ?? []
+          for (const skill of allSkills) {
+            if (allowedSkills.has(skill.name) && skill.allowedTools) {
+              for (const toolName of skill.allowedTools) names.add(toolName)
+            }
+          }
+        }
+      }
     }
 
     return names
@@ -588,7 +600,18 @@ export class TaskSteeringMiddleware {
     if (this._skillsActive && state != null) {
       const allSkills = (state.skillsMetadata as SkillMetadata[] | undefined) ?? []
       const allowedNames = this._allowedSkillNames(active)
+      const availableNames = new Set(allSkills.map((s) => s.name))
       const visibleSkills = allSkills.filter((s) => allowedNames.has(s.name))
+
+      const missing = [...allowedNames].filter((n) => !availableNames.has(n))
+      if (missing.length > 0) {
+        console.warn(
+          `[langchain-task-steering] Skill(s) ${missing.sort().join(', ')} referenced by ` +
+            `task/global config but not found in skillsMetadata state. Check skill names ` +
+            `and ensure skills are loaded (e.g. via SkillsMiddleware).`
+        )
+      }
+
       if (visibleSkills.length > 0) {
         hasVisibleSkills = true
         lines.push('\n  <available_skills>')

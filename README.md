@@ -156,7 +156,7 @@ Only the active task's tools (plus globals and `update_task_status`) are visible
 
 | Hook | Behavior |
 |---|---|
-| `beforeAgent` | Initializes `taskStatuses` in state. When skills are configured, loads skill metadata from the backend. |
+| `beforeAgent` | Initializes `taskStatuses` in state. |
 | `wrapModelCall` | Appends task status board + active task instruction to system prompt. Filters tools to only the active task's tools + globals + `update_task_status`. Delegates to task-scoped middleware if present. |
 | `wrapToolCall` | Intercepts `update_task_status` — runs `validateCompletion` on the task's scoped middleware before allowing completion. Rejects out-of-scope tool calls. Delegates other tool calls to the active task's scoped middleware. |
 | `afterAgent` | Checks if required tasks are complete. If not, nudges the agent back (up to `maxNudges` times). |
@@ -363,7 +363,7 @@ agent = create_deep_agent(
 )
 ```
 
-When skills are active, the model sees an `<available_skills>` section in the status block listing the skill name, description, and `SKILL.md` path. `read_file` and `ls` are auto-whitelisted so the model can read skill files.
+When skills are active, the model sees an `<available_skills>` section in the status block listing the skill name, description, and `SKILL.md` path. `read_file` and `ls` are auto-whitelisted for any task that has skills (its own or via `globalSkills`) so the model can read skill files.
 
 ## Backend tools passthrough
 

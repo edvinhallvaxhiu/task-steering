@@ -104,14 +104,6 @@ describe('Skills init', () => {
     expect((mw as any)._skillsActive).toBe(true)
   })
 
-  it('skillSources alone does not activate skills', () => {
-    const mw = new TaskSteeringMiddleware({
-      tasks: [{ name: 'a', instruction: 'A', tools: [toolA] }],
-      skillSources: ['/skills/'],
-    })
-    expect((mw as any)._skillsActive).toBe(false)
-  })
-
   it('task skills field defaults to undefined', () => {
     const task: Task = { name: 'a', instruction: 'A', tools: [toolA] }
     expect(task.skills).toBeUndefined()
@@ -261,6 +253,34 @@ describe('Skill rendering', () => {
     const block = mw._renderStatusBlock({ research: 'in_progress', write: 'pending' }, 'research')
     expect(block).not.toContain('<available_skills>')
   })
+
+  it('warns on missing skill names', () => {
+    const mw = makeMiddleware()
+    const state = {
+      messages: [],
+      taskStatuses: { research: 'in_progress', write: 'pending' },
+      skillsMetadata: [
+        // "web-research" and "formatting" are referenced but only "formatting" exists
+        { name: 'formatting', description: 'Format documents.', path: '/skills/formatting/SKILL.md' },
+      ],
+    }
+    const statuses = (mw as any)._getStatuses(state) as Record<string, string>
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {})
+    mw._renderStatusBlock(statuses, 'research', state)
+    expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining('web-research'))
+    expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining('not found in skillsMetadata'))
+    warnSpy.mockRestore()
+  })
+
+  it('no warning when all skills present', () => {
+    const mw = makeMiddleware()
+    const state = stateWithSkills()
+    const statuses = (mw as any)._getStatuses(state) as Record<string, string>
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {})
+    mw._renderStatusBlock(statuses, 'research', state)
+    expect(warnSpy).not.toHaveBeenCalled()
+    warnSpy.mockRestore()
+  })
 })
 
 // ════════════════════════════════════════════════════════════
@@ -286,6 +306,31 @@ describe('Skill tool auto-whitelist', () => {
     expect(allowed.has('ls')).toBe(false)
   })
 
+  it('no auto-whitelist for task without skills', () => {
+    const mw = new TaskSteeringMiddleware({
+      tasks: [
+        { name: 'a', instruction: 'A', tools: [toolA], skills: ['s1'] },
+        { name: 'b', instruction: 'B', tools: [toolB] },
+      ],
+    })
+    const allowed = mw._allowedToolNames('b')
+    expect(allowed.has('read_file')).toBe(false)
+    expect(allowed.has('ls')).toBe(false)
+  })
+
+  it('auto-whitelist via global skills for task without own skills', () => {
+    const mw = new TaskSteeringMiddleware({
+      tasks: [
+        { name: 'a', instruction: 'A', tools: [toolA], skills: ['s1'] },
+        { name: 'b', instruction: 'B', tools: [toolB] },
+      ],
+      globalSkills: ['gs'],
+    })
+    const allowed = mw._allowedToolNames('b')
+    expect(allowed.has('read_file')).toBe(true)
+    expect(allowed.has('ls')).toBe(true)
+  })
+
   it('auto-whitelist independent of passthrough', () => {
     const mw = new TaskSteeringMiddleware({
       tasks: [{ name: 'a', instruction: 'A', tools: [toolA], skills: ['s1'] }],
@@ -308,6 +353,97 @@ describe('Skill tool auto-whitelist', () => {
     expect(allowed.has('ls')).toBe(true)
     expect(allowed.has('write_file')).toBe(true)
     expect(allowed.has('execute')).toBe(true)
+  })
+
+  it('skill allowedTools whitelisted when state provided', () => {
+    const mw = new TaskSteeringMiddleware({
+      tasks: [{ name: 'a', instruction: 'A', tools: [toolA], skills: ['s1'] }],
+    })
+    const state = {
+      skillsMetadata: [
+        {
+          name: 's1',
+          description: 'Skill 1',
+          path: '/skills/s1/SKILL.md',
+          allowedTools: ['web_search', 'scrape_url'],
+        },
+      ],
+    }
+    const allowed = mw._allowedToolNames('a', state)
+    expect(allowed.has('web_search')).toBe(true)
+    expect(allowed.has('scrape_url')).toBe(true)
+  })
+
+  it('skill allowedTools scoped to active task', () => {
+    const mw = new TaskSteeringMiddleware({
+      tasks: [
+        { name: 'a', instruction: 'A', tools: [toolA], skills: ['s1'] },
+        { name: 'b', instruction: 'B', tools: [toolB], skills: ['s2'] },
+      ],
+    })
+    const state = {
+      skillsMetadata: [
+        {
+          name: 's1',
+          description: 'Skill 1',
+          path: '/skills/s1/SKILL.md',
+          allowedTools: ['web_search'],
+        },
+        {
+          name: 's2',
+          description: 'Skill 2',
+          path: '/skills/s2/SKILL.md',
+          allowedTools: ['code_exec'],
+        },
+      ],
+    }
+    const allowedA = mw._allowedToolNames('a', state)
+    expect(allowedA.has('web_search')).toBe(true)
+    expect(allowedA.has('code_exec')).toBe(false)
+
+    const allowedB = mw._allowedToolNames('b', state)
+    expect(allowedB.has('code_exec')).toBe(true)
+    expect(allowedB.has('web_search')).toBe(false)
+  })
+
+  it('skill allowedTools includes global skills', () => {
+    const mw = new TaskSteeringMiddleware({
+      tasks: [{ name: 'a', instruction: 'A', tools: [toolA] }],
+      globalSkills: ['gs'],
+    })
+    const state = {
+      skillsMetadata: [
+        {
+          name: 'gs',
+          description: 'Global',
+          path: '/skills/gs/SKILL.md',
+          allowedTools: ['format_doc'],
+        },
+      ],
+    }
+    const allowed = mw._allowedToolNames('a', state)
+    expect(allowed.has('format_doc')).toBe(true)
+  })
+
+  it('skill allowedTools without state is noop', () => {
+    const mw = new TaskSteeringMiddleware({
+      tasks: [{ name: 'a', instruction: 'A', tools: [toolA], skills: ['s1'] }],
+    })
+    const allowed = mw._allowedToolNames('a')
+    expect(allowed.has('read_file')).toBe(true)
+    expect(allowed.has('web_search')).toBe(false)
+  })
+
+  it('skill without allowedTools field does not break', () => {
+    const mw = new TaskSteeringMiddleware({
+      tasks: [{ name: 'a', instruction: 'A', tools: [toolA], skills: ['s1'] }],
+    })
+    const state = {
+      skillsMetadata: [{ name: 's1', description: 'Skill 1', path: '/skills/s1/SKILL.md' }],
+    }
+    const allowed = mw._allowedToolNames('a', state)
+    expect(allowed.has('read_file')).toBe(true)
+    expect(allowed.has('ls')).toBe(true)
   })
 })
 

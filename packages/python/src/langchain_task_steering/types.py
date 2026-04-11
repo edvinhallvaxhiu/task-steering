@@ -38,7 +38,7 @@ class TaskSteeringState(AgentState):
 
     task_statuses: NotRequired[dict[str, str]]
     nudge_count: NotRequired[int]
-    skills_metadata: NotRequired[list]
+    skills_metadata: NotRequired[list[SkillMetadata]]
 
 
 class TaskMiddleware(AgentMiddleware):

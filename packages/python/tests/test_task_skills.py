@@ -1,5 +1,6 @@
 """Tests for task-scoped skills integration."""
 
+import logging
 import pytest
 from unittest.mock import MagicMock
 
@@ -189,6 +190,34 @@ class TestSkillRendering:
         block = mw._render_status_block(statuses, active="research")
         assert "<available_skills>" not in block
 
+    def test_warns_on_missing_skill_names(self, caplog):
+        mw = self._make_middleware()
+        state = {
+            "messages": [],
+            "task_statuses": {"research": "in_progress", "write": "pending"},
+            "skills_metadata": [
+                # "web-research" and "formatting" are referenced but only "formatting" exists
+                {
+                    "name": "formatting",
+                    "description": "Format documents.",
+                    "path": "/skills/formatting/SKILL.md",
+                },
+            ],
+        }
+        statuses = mw._get_statuses(state)
+        with caplog.at_level(logging.WARNING, logger="langchain_task_steering.middleware"):
+            mw._render_status_block(statuses, active="research", state=state)
+        assert "web-research" in caplog.text
+        assert "not found in skills_metadata" in caplog.text
+
+    def test_no_warning_when_all_skills_present(self, caplog):
+        mw = self._make_middleware()
+        state = self._state_with_skills()
+        statuses = mw._get_statuses(state)
+        with caplog.at_level(logging.WARNING, logger="langchain_task_steering.middleware"):
+            mw._render_status_block(statuses, active="research", state=state)
+        assert "not found in skills_metadata" not in caplog.text
+
 
 # ════════════════════════════════════════════════════════════
 # Tool Auto-Whitelist
@@ -209,6 +238,28 @@ class TestSkillToolAutoWhitelist:
         allowed = mw._allowed_tool_names("a")
         assert "read_file" not in allowed
         assert "ls" not in allowed
+
+    def test_no_auto_whitelist_for_task_without_skills(self):
+        """Task with no skills should not get read_file/ls even if another task has skills."""
+        tasks = [
+            Task(name="a", instruction="A", tools=[tool_a], skills=["s1"]),
+            Task(name="b", instruction="B", tools=[tool_b]),
+        ]
+        mw = TaskSteeringMiddleware(tasks=tasks)
+        allowed = mw._allowed_tool_names("b")
+        assert "read_file" not in allowed
+        assert "ls" not in allowed
+
+    def test_auto_whitelist_via_global_skills(self):
+        """Task without own skills still gets read_file/ls when global_skills are set."""
+        tasks = [
+            Task(name="a", instruction="A", tools=[tool_a], skills=["s1"]),
+            Task(name="b", instruction="B", tools=[tool_b]),
+        ]
+        mw = TaskSteeringMiddleware(tasks=tasks, global_skills=["gs"])
+        allowed = mw._allowed_tool_names("b")
+        assert "read_file" in allowed
+        assert "ls" in allowed
 
     def test_auto_whitelist_independent_of_passthrough(self):
         tasks = [Task(name="a", instruction="A", tools=[tool_a], skills=["s1"])]
@@ -233,6 +284,94 @@ class TestSkillToolAutoWhitelist:
         assert "ls" in allowed
         assert "write_file" in allowed
         assert "execute" in allowed
+
+    def test_skill_allowed_tools_whitelisted(self):
+        """Tools declared in a skill's allowed_tools frontmatter are whitelisted."""
+        tasks = [Task(name="a", instruction="A", tools=[tool_a], skills=["s1"])]
+        mw = TaskSteeringMiddleware(tasks=tasks)
+        state = {
+            "skills_metadata": [
+                {
+                    "name": "s1",
+                    "description": "Skill 1",
+                    "path": "/skills/s1/SKILL.md",
+                    "allowed_tools": ["web_search", "scrape_url"],
+                },
+            ],
+        }
+        allowed = mw._allowed_tool_names("a", state=state)
+        assert "web_search" in allowed
+        assert "scrape_url" in allowed
+
+    def test_skill_allowed_tools_scoped_to_active_task(self):
+        """allowed_tools from skills not in scope are excluded."""
+        tasks = [
+            Task(name="a", instruction="A", tools=[tool_a], skills=["s1"]),
+            Task(name="b", instruction="B", tools=[tool_b], skills=["s2"]),
+        ]
+        mw = TaskSteeringMiddleware(tasks=tasks)
+        state = {
+            "skills_metadata": [
+                {
+                    "name": "s1",
+                    "description": "Skill 1",
+                    "path": "/skills/s1/SKILL.md",
+                    "allowed_tools": ["web_search"],
+                },
+                {
+                    "name": "s2",
+                    "description": "Skill 2",
+                    "path": "/skills/s2/SKILL.md",
+                    "allowed_tools": ["code_exec"],
+                },
+            ],
+        }
+        allowed_a = mw._allowed_tool_names("a", state=state)
+        assert "web_search" in allowed_a
+        assert "code_exec" not in allowed_a
+
+        allowed_b = mw._allowed_tool_names("b", state=state)
+        assert "code_exec" in allowed_b
+        assert "web_search" not in allowed_b
+
+    def test_skill_allowed_tools_includes_global_skills(self):
+        """allowed_tools from global skills are whitelisted on any task."""
+        tasks = [Task(name="a", instruction="A", tools=[tool_a])]
+        mw = TaskSteeringMiddleware(tasks=tasks, global_skills=["gs"])
+        state = {
+            "skills_metadata": [
+                {
+                    "name": "gs",
+                    "description": "Global",
+                    "path": "/skills/gs/SKILL.md",
+                    "allowed_tools": ["format_doc"],
+                },
+            ],
+        }
+        allowed = mw._allowed_tool_names("a", state=state)
+        assert "format_doc" in allowed
+
+    def test_skill_allowed_tools_without_state_is_noop(self):
+        """Without state, allowed_tools cannot be resolved — no error."""
+        tasks = [Task(name="a", instruction="A", tools=[tool_a], skills=["s1"])]
+        mw = TaskSteeringMiddleware(tasks=tasks)
+        allowed = mw._allowed_tool_names("a")
+        # Only the hardcoded read_file/ls, not skill-specific tools
+        assert "read_file" in allowed
+        assert "web_search" not in allowed
+
+    def test_skill_without_allowed_tools_field(self):
+        """Skills that don't declare allowed_tools don't break anything."""
+        tasks = [Task(name="a", instruction="A", tools=[tool_a], skills=["s1"])]
+        mw = TaskSteeringMiddleware(tasks=tasks)
+        state = {
+            "skills_metadata": [
+                {"name": "s1", "description": "Skill 1", "path": "/skills/s1/SKILL.md"},
+            ],
+        }
+        allowed = mw._allowed_tool_names("a", state=state)
+        assert "read_file" in allowed
+        assert "ls" in allowed
 
 
 # ════════════════════════════════════════════════════════════

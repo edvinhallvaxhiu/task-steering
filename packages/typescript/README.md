@@ -102,7 +102,7 @@ Only the active task's tools (plus globals and `update_task_status`) are visible
 
 | Hook                                         | Behavior                                                                                                                                                                                                                    |
 | -------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `beforeAgent(state)`                         | Initializes `taskStatuses` in state. When skills are configured, loads skill metadata from the backend and stores it in state.                                                                                              |
+| `beforeAgent(state)`                         | Initializes `taskStatuses` in state.                                                                                                                                                                                        |
 | `wrapModelCall(request, handler)`            | Appends task status board + active task instruction to system prompt. Filters tools to only the active task's tools + globals + `update_task_status`. Delegates to task-scoped middleware if present.                       |
 | `wrapToolCall(request, handler)`             | Intercepts `update_task_status` — runs `validateCompletion` on the task's scoped middleware before allowing completion. Rejects out-of-scope tool calls. Delegates other tool calls to the active task's scoped middleware. |
 | `afterAgent(state)`                          | Checks if required tasks are complete. If not, returns a nudge message (up to `maxNudges` times).                                                                                                                           |
@@ -223,7 +223,7 @@ Composition semantics:
 
 Skills are prompt-injected capabilities loaded from `SKILL.md` files. When configured, skills are scoped per task — just like tools.
 
-`SkillsMiddleware` (in `create_deep_agent`) loads all skills into state. `TaskSteeringMiddleware` filters them per task — no `backend` or `skillSources` needed:
+`SkillsMiddleware` (in `create_deep_agent`) loads all skills into state. `TaskSteeringMiddleware` filters them per task:
 
 ```typescript
 createDeepAgent({
@@ -277,7 +277,7 @@ When skills are active, the model sees them in the status block:
 </task_pipeline>
 ```
 
-When skills are active, `read_file` and `ls` are auto-whitelisted in the tool filter so the model can read `SKILL.md` files regardless of which task is active.
+When skills are active, `read_file` and `ls` are auto-whitelisted in the tool filter for any task that has skills (its own or via `globalSkills`) so the model can read `SKILL.md` files.
 
 ## Backend tools passthrough
 
@@ -330,7 +330,7 @@ const pipeline = new TaskSteeringMiddleware({
 | `instruction` | yes      | Injected into system prompt when this task is active.                                                                            |
 | `tools`       | yes      | Tools visible when this task is `IN_PROGRESS`.                                                                                   |
 | `middleware`  | no       | Scoped middleware — a `TaskMiddleware`, agent middleware object (auto-wrapped), or a list of them. Only active during this task. |
-| `skills`      | no       | Skill names available when this task is `IN_PROGRESS`. Requires `backend` + `skillSources` on the middleware.                    |
+| `skills`      | no       | Skill names available when this task is `IN_PROGRESS`. Skill metadata comes from state (loaded by `SkillsMiddleware`).           |
 
 ## Agent integration
 

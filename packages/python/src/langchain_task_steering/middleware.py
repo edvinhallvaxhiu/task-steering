@@ -1,6 +1,7 @@
 """TaskSteeringMiddleware — implicit state machine for LangChain v1 agents."""
 
 import copy
+import logging
 import typing
 import warnings
 from collections.abc import Awaitable, Callable
@@ -17,6 +18,8 @@ from typing_extensions import TypedDict
 
 from ._hooks import WRAP_HOOK_PAIRS, overrides_base
 from .types import Task, TaskMiddleware, TaskStatus, TaskSteeringState
+
+logger = logging.getLogger(__name__)
 
 _TRANSITION_TOOL_NAME = "update_task_status"
 _REQUIRE_ALL = ("*",)
@@ -347,7 +350,7 @@ class TaskSteeringMiddleware(AgentMiddleware[TaskSteeringState]):
     def before_agent(
         self, state: TaskSteeringState, runtime: Runtime
     ) -> dict[str, Any] | None:
-        """Initialize task_statuses and load skills on first invocation."""
+        """Initialize task_statuses on first invocation."""
         updates: dict[str, Any] = {}
 
         if state.get("task_statuses") is None:
@@ -443,7 +446,7 @@ class TaskSteeringMiddleware(AgentMiddleware[TaskSteeringState]):
 
         new_content = existing + [{"type": "text", "text": block}]
 
-        allowed_names = self._allowed_tool_names(active_name)
+        allowed_names = self._allowed_tool_names(active_name, state=request.state)
         scoped = [t for t in request.tools if t.name in allowed_names]
 
         modified = request.override(
@@ -579,7 +582,7 @@ class TaskSteeringMiddleware(AgentMiddleware[TaskSteeringState]):
         self, request: ToolCallRequest, active_name: str | None
     ) -> ToolMessage | None:
         """Reject tool calls not in scope for the active task."""
-        allowed = self._allowed_tool_names(active_name)
+        allowed = self._allowed_tool_names(active_name, state=request.state)
         if request.tool_call["name"] not in allowed:
             return ToolMessage(
                 content=(
@@ -738,7 +741,9 @@ class TaskSteeringMiddleware(AgentMiddleware[TaskSteeringState]):
         task = self._task_map.get(task_name)
         return task.middleware if task else None
 
-    def _allowed_tool_names(self, active_name: str | None) -> set[str]:
+    def _allowed_tool_names(
+        self, active_name: str | None, state: dict | None = None
+    ) -> set[str]:
         names = {_TRANSITION_TOOL_NAME}
         names.update(t.name for t in self._global_tools)
         if active_name:
@@ -750,7 +755,14 @@ class TaskSteeringMiddleware(AgentMiddleware[TaskSteeringState]):
         if self._backend_tools_passthrough:
             names.update(self._backend_tools)
         if self._skills_active:
-            names.update(self._skill_required_tools)
+            allowed_skills = self._allowed_skill_names(active_name)
+            if allowed_skills:
+                names.update(self._skill_required_tools)
+                # Whitelist tools declared by visible skills (allowed_tools frontmatter)
+                if state is not None:
+                    for skill in state.get("skills_metadata") or []:
+                        if skill["name"] in allowed_skills:
+                            names.update(skill.get("allowed_tools") or [])
         return names
 
     def _allowed_skill_names(self, active_name: str | None) -> set[str]:
@@ -793,7 +805,18 @@ class TaskSteeringMiddleware(AgentMiddleware[TaskSteeringState]):
         if self._skills_active and state is not None:
             all_skills = state.get("skills_metadata") or []
             allowed_names = self._allowed_skill_names(active)
+            available_names = {s["name"] for s in all_skills}
             visible_skills = [s for s in all_skills if s["name"] in allowed_names]
+
+            missing = allowed_names - available_names
+            if missing:
+                logger.warning(
+                    "Skill(s) %s referenced by task/global config but not found "
+                    "in skills_metadata state. Check skill names and ensure "
+                    "skills are loaded (e.g. via SkillsMiddleware).",
+                    ", ".join(sorted(missing)),
+                )
+
             if visible_skills:
                 has_visible_skills = True
                 lines.append("\n  <available_skills>")
