@@ -8,8 +8,10 @@
 import {
   TaskSteeringMiddleware,
   TaskMiddleware,
+  AgentMiddlewareAdapter,
   TaskStatus,
   getContentBlocks,
+  type AgentMiddlewareLike,
   type Task,
   type ToolLike,
   type ModelRequest,
@@ -17,6 +19,8 @@ import {
   type ToolMessageResult,
   type CommandResult,
   type ContentBlock,
+  type ModelCallHandler,
+  type ToolCallHandler,
 } from '../src/index.js'
 
 // ── Helpers ─────────────────────────────────────────────────
@@ -78,6 +82,49 @@ const globalSearch: ToolLike = {
   description: 'Search documentation (available in all tasks).',
 }
 
+// ── Adapter-contributed tools ───────────────────────────────
+
+const auditLog: ToolLike = {
+  name: 'audit_log',
+  description: 'Log an audit entry (contributed by adapter).',
+}
+
+// ── Agent-level middleware to wrap via adapter ──────────────
+
+/**
+ * Simulates an existing agent middleware that:
+ * - Contributes a tool (audit_log)
+ * - Intercepts model calls (e.g. to inject extra context)
+ * - Intercepts tool calls (e.g. to log usage)
+ */
+class AuditMiddleware implements AgentMiddlewareLike {
+  tools = [auditLog]
+  modelCallCount = 0
+  toolCallCount = 0
+
+  wrapModelCall(request: ModelRequest, handler: ModelCallHandler) {
+    this.modelCallCount++
+    log('ADAPTER', YELLOW, `AuditMiddleware.wrapModelCall() — call #${this.modelCallCount}`)
+    return handler(request)
+  }
+
+  wrapToolCall(request: ToolCallRequest, handler: ToolCallHandler) {
+    this.toolCallCount++
+    log(
+      'ADAPTER',
+      YELLOW,
+      `AuditMiddleware.wrapToolCall(${request.toolCall.name}) — call #${this.toolCallCount}`
+    )
+    return handler(request)
+  }
+}
+
+/**
+ * A no-op middleware — verifies that the adapter gracefully
+ * handles an inner middleware that implements no hooks.
+ */
+class NoOpMiddleware implements AgentMiddlewareLike {}
+
 // ── Task middleware with validation ─────────────────────────
 
 class DesignMiddleware extends TaskMiddleware {
@@ -89,22 +136,31 @@ class DesignMiddleware extends TaskMiddleware {
     return null
   }
 
-  onStart(_state: Record<string, unknown>): void {
-    log('LIFECYCLE', YELLOW, 'DesignMiddleware.onStart() fired')
+  onStart(state: Record<string, unknown>): void {
+    const statuses = state.taskStatuses as Record<string, string> | undefined
+    log('LIFECYCLE', YELLOW, `DesignMiddleware.onStart() — statuses: ${JSON.stringify(statuses)}`)
   }
 
-  onComplete(_state: Record<string, unknown>): void {
-    log('LIFECYCLE', YELLOW, 'DesignMiddleware.onComplete() fired')
+  onComplete(state: Record<string, unknown>): void {
+    const statuses = state.taskStatuses as Record<string, string> | undefined
+    log(
+      'LIFECYCLE',
+      YELLOW,
+      `DesignMiddleware.onComplete() — statuses: ${JSON.stringify(statuses)}`
+    )
   }
 }
 
 // ── Build the middleware ────────────────────────────────────
+
+const auditMw = new AuditMiddleware()
 
 const tasks: Task[] = [
   {
     name: 'requirements',
     instruction: 'Gather the requirements for a login page.',
     tools: [gatherRequirements],
+    middleware: new AgentMiddlewareAdapter(new NoOpMiddleware()),
   },
   {
     name: 'design',
@@ -116,6 +172,7 @@ const tasks: Task[] = [
     name: 'review',
     instruction: 'Review the design document and provide final feedback.',
     tools: [reviewDesign],
+    middleware: new AgentMiddlewareAdapter(auditMw),
   },
 ]
 
@@ -125,7 +182,8 @@ const mw = new TaskSteeringMiddleware({
 })
 
 console.log(`\n${GREEN}langchain-task-steering TypeScript Demo${RESET}`)
-console.log(`${DIM}Simulating an agent loop through all middleware hooks${RESET}\n`)
+console.log(`${DIM}Simulating an agent loop through all middleware hooks${RESET}`)
+console.log(`${DIM}Including AgentMiddlewareAdapter forwarding${RESET}\n`)
 
 console.log('Registered tools:', mw.tools.map((t) => t.name).join(', '))
 
@@ -173,25 +231,23 @@ console.log(
 )
 
 // ════════════════════════════════════════════════════════════
-// Step 3: Start "requirements" task
+// Step 3: Start "requirements" (has NoOpMiddleware adapter)
 // ════════════════════════════════════════════════════════════
 
-header('Step 3: Transition "requirements" to in_progress')
+header('Step 3: Start "requirements" (NoOpMiddleware adapter — should pass through)')
 
 let result = mw.executeTransition({ task: 'requirements', status: 'in_progress' }, state, 'call-1')
 if (isCommand(result)) {
   Object.assign(state, result.update)
   log('OK', GREEN, `requirements -> in_progress`)
   log('STATE', BLUE, `taskStatuses = ${JSON.stringify(state.taskStatuses)}`)
-} else {
-  log('ERROR', RED, result.content)
 }
 
 // ════════════════════════════════════════════════════════════
-// Step 4: wrapModelCall — now "requirements" is active
+// Step 4: wrapModelCall — "requirements" active with NoOp adapter
 // ════════════════════════════════════════════════════════════
 
-header('Step 4: wrapModelCall — "requirements" is active')
+header('Step 4: wrapModelCall — "requirements" active (NoOp adapter delegates to handler)')
 
 captured = null
 mw.wrapModelCall(mockModelRequest(state, mw.tools), (r) => {
@@ -199,6 +255,7 @@ mw.wrapModelCall(mockModelRequest(state, mw.tools), (r) => {
   return {}
 })
 log('TOOLS', BLUE, `Model sees: ${captured!.tools.map((t) => t.name).join(', ')}`)
+log('OK', GREEN, 'No crash — NoOp adapter correctly passed through to handler')
 
 // ════════════════════════════════════════════════════════════
 // Step 5: Try to use a tool from another task (should be rejected)
@@ -241,7 +298,7 @@ if (isCommand(result)) {
   log('OK', GREEN, 'requirements -> complete')
 }
 
-header('Step 8: Start "design" (lifecycle hooks fire)')
+header('Step 8: Start "design" (lifecycle hooks fire with post-transition state)')
 
 // Use wrapToolCall so lifecycle hooks fire
 const startDesignReq: ToolCallRequest = {
@@ -294,7 +351,7 @@ if (!isCommand(result)) {
 // Step 10: Fix state and complete "design"
 // ════════════════════════════════════════════════════════════
 
-header('Step 10: Set designWritten=true, then complete "design"')
+header('Step 10: Set designWritten=true, then complete "design" (onComplete fires)')
 
 state.designWritten = true
 log('STATE', BLUE, 'Set designWritten = true')
@@ -320,18 +377,93 @@ if (isCommand(result)) {
 }
 
 // ════════════════════════════════════════════════════════════
-// Step 11: Complete "review"
+// Step 11: Start "review" — has AuditMiddleware adapter
 // ════════════════════════════════════════════════════════════
 
-header('Step 11: Start and complete "review"')
+header('Step 11: Start "review" (AuditMiddleware adapter — hooks forwarded)')
 
-result = mw.executeTransition({ task: 'review', status: 'in_progress' }, state, 'call-8')
+const startReviewReq: ToolCallRequest = {
+  toolCall: {
+    name: 'update_task_status',
+    args: { task: 'review', status: 'in_progress' },
+    id: 'call-8',
+  },
+  state,
+}
+result = mw.wrapToolCall(startReviewReq, (req) =>
+  mw.executeTransition(
+    req.toolCall.args as { task: string; status: string },
+    req.state,
+    req.toolCall.id
+  )
+)
 if (isCommand(result)) {
   Object.assign(state, result.update)
   log('OK', GREEN, 'review -> in_progress')
+  log('STATE', BLUE, `taskStatuses = ${JSON.stringify(state.taskStatuses)}`)
 }
 
-result = mw.executeTransition({ task: 'review', status: 'complete' }, state, 'call-9')
+// ════════════════════════════════════════════════════════════
+// Step 12: wrapModelCall with "review" active — adapter intercepts
+// ════════════════════════════════════════════════════════════
+
+header('Step 12: wrapModelCall — "review" active (AuditMiddleware intercepts)')
+
+captured = null
+mw.wrapModelCall(mockModelRequest(state, mw.tools), (r) => {
+  captured = r
+  return {}
+})
+log('TOOLS', BLUE, `Model sees: ${captured!.tools.map((t) => t.name).join(', ')}`)
+log(
+  'INFO',
+  BLUE,
+  `audit_log tool is scoped: ${captured!.tools.some((t) => t.name === 'audit_log')}`
+)
+
+// ════════════════════════════════════════════════════════════
+// Step 13: Use review_design tool — adapter intercepts wrapToolCall
+// ════════════════════════════════════════════════════════════
+
+header('Step 13: Call review_design — AuditMiddleware.wrapToolCall intercepts')
+
+const reviewToolReq: ToolCallRequest = {
+  toolCall: { name: 'review_design', args: { design: 'login page v1' }, id: 'call-9' },
+  state,
+}
+const reviewResult = mw.wrapToolCall(reviewToolReq, () => ({
+  content: 'Review looks good.',
+  toolCallId: 'call-9',
+}))
+if (!isCommand(reviewResult)) {
+  log('RESULT', GREEN, reviewResult.content)
+}
+
+// ════════════════════════════════════════════════════════════
+// Step 14: Use audit_log (adapter-contributed tool)
+// ════════════════════════════════════════════════════════════
+
+header('Step 14: Call audit_log — tool contributed by adapter')
+
+const auditToolReq: ToolCallRequest = {
+  toolCall: { name: 'audit_log', args: { entry: 'design reviewed' }, id: 'call-10' },
+  state,
+}
+const auditResult = mw.wrapToolCall(auditToolReq, () => ({
+  content: 'Audit entry logged.',
+  toolCallId: 'call-10',
+}))
+if (!isCommand(auditResult)) {
+  log('RESULT', GREEN, auditResult.content)
+}
+
+// ════════════════════════════════════════════════════════════
+// Step 15: Complete "review"
+// ════════════════════════════════════════════════════════════
+
+header('Step 15: Complete "review"')
+
+result = mw.executeTransition({ task: 'review', status: 'complete' }, state, 'call-11')
 if (isCommand(result)) {
   Object.assign(state, result.update)
   log('OK', GREEN, 'review -> complete')
@@ -340,10 +472,10 @@ if (isCommand(result)) {
 log('STATE', BLUE, `taskStatuses = ${JSON.stringify(state.taskStatuses)}`)
 
 // ════════════════════════════════════════════════════════════
-// Step 12: afterAgent — all tasks complete, no nudge needed
+// Step 16: afterAgent — all tasks complete, no nudge needed
 // ════════════════════════════════════════════════════════════
 
-header('Step 12: afterAgent — check if agent can exit')
+header('Step 16: afterAgent — check if agent can exit')
 
 const nudge = mw.afterAgent(state as any)
 if (nudge === null) {
@@ -353,7 +485,16 @@ if (nudge === null) {
 }
 
 // ════════════════════════════════════════════════════════════
-// Bonus: Show afterAgent nudging with incomplete tasks
+// Step 17: Adapter call summary
+// ════════════════════════════════════════════════════════════
+
+header('Step 17: AuditMiddleware adapter call summary')
+
+log('INFO', BLUE, `AuditMiddleware.wrapModelCall invoked ${auditMw.modelCallCount} time(s)`)
+log('INFO', BLUE, `AuditMiddleware.wrapToolCall invoked ${auditMw.toolCallCount} time(s)`)
+
+// ════════════════════════════════════════════════════════════
+// Bonus: afterAgent nudge with incomplete tasks
 // ════════════════════════════════════════════════════════════
 
 header('Bonus: afterAgent nudge with incomplete tasks')
@@ -372,5 +513,36 @@ if (nudgeResult) {
   log('NUDGE', YELLOW, `nudgeCount: ${nudgeResult.nudgeCount}`)
   log('NUDGE', YELLOW, `message: ${(nudgeResult.messages[0] as any).content}`)
 }
+
+// ════════════════════════════════════════════════════════════
+// Bonus: wrapModelCall with null system message
+// ════════════════════════════════════════════════════════════
+
+header('Bonus: wrapModelCall with null system message — no crash')
+
+const nullSysMsgReq: ModelRequest = {
+  state,
+  systemMessage: null as unknown as any,
+  tools: mw.tools,
+  override(overrides) {
+    return {
+      state,
+      systemMessage: overrides.systemMessage ?? this.systemMessage,
+      tools: overrides.tools ?? this.tools,
+      override: this.override,
+    }
+  },
+}
+let nullCaptured: ModelRequest | null = null
+mw.wrapModelCall(nullSysMsgReq, (r) => {
+  nullCaptured = r
+  return {}
+})
+const nullBlocks = getContentBlocks(nullCaptured!.systemMessage)
+log(
+  'OK',
+  GREEN,
+  `Pipeline block injected: ${nullBlocks.some((b) => b.text?.includes('<task_pipeline>'))}`
+)
 
 console.log(`\n${GREEN}Demo complete!${RESET}\n`)

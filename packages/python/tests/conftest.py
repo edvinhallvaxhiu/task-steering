@@ -142,6 +142,63 @@ class ToolGateMiddleware(TaskMiddleware):
         return handler(request)
 
 
+# ── Shared helpers ─────────────────────────────────────────
+
+
+def make_mock_tool(name: str):
+    """Create a minimal mock tool with a name attribute."""
+    t = MagicMock()
+    t.name = name
+    return t
+
+
+class MockLsResult:
+    def __init__(self, entries):
+        self.entries = entries
+
+
+class MockDownloadResponse:
+    def __init__(self, content=None, error=None):
+        self.content = content
+        self.error = error
+
+
+class MockBackend:
+    """Configurable mock backend for testing skill loading."""
+
+    def __init__(self, ls_results=None, download_responses=None):
+        self._ls_results = ls_results or {}
+        self._download_responses = download_responses or {}
+
+    def ls(self, path):
+        if path in self._ls_results:
+            return MockLsResult(self._ls_results[path])
+        return MockLsResult([])
+
+    def download_files(self, paths):
+        return [
+            self._download_responses.get(p, MockDownloadResponse(error="not found"))
+            for p in paths
+        ]
+
+
+def make_backend_with_skills(*skill_defs):
+    """Build a mock backend from (name, description) tuples."""
+    entries = []
+    downloads = {}
+    for name, desc in skill_defs:
+        dir_path = f"/skills/{name}"
+        md_path = f"{dir_path}/SKILL.md"
+        entries.append({"path": dir_path, "is_dir": True})
+        content = f"---\nname: {name}\ndescription: {desc}\n---\n".encode()
+        downloads[md_path] = MockDownloadResponse(content=content)
+
+    return MockBackend(
+        ls_results={"/skills/": entries},
+        download_responses=downloads,
+    )
+
+
 # ── Fixtures ────────────────────────────────────────────────
 
 

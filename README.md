@@ -1,6 +1,6 @@
 # langchain-task-steering
 
-Implicit state-machine middleware for LangChain agents. Define ordered task pipelines with per-task tool scoping, dynamic prompt injection, and composable validation.
+Implicit state-machine middleware for LangChain agents. Define ordered task pipelines with per-task tool scoping, per-task skill scoping, dynamic prompt injection, and composable validation.
 
 Available for both **Python** and **TypeScript**.
 
@@ -156,7 +156,7 @@ Only the active task's tools (plus globals and `update_task_status`) are visible
 
 | Hook | Behavior |
 |---|---|
-| `beforeAgent` | Initializes `taskStatuses` in state on first invocation. |
+| `beforeAgent` | Initializes `taskStatuses` in state. |
 | `wrapModelCall` | Appends task status board + active task instruction to system prompt. Filters tools to only the active task's tools + globals + `update_task_status`. Delegates to task-scoped middleware if present. |
 | `wrapToolCall` | Intercepts `update_task_status` — runs `validateCompletion` on the task's scoped middleware before allowing completion. Rejects out-of-scope tool calls. Delegates other tool calls to the active task's scoped middleware. |
 | `afterAgent` | Checks if required tasks are complete. If not, nudges the agent back (up to `maxNudges` times). |
@@ -253,6 +253,131 @@ class ThreatsMiddleware extends TaskMiddleware {
 | `onComplete(state)` | After successful `complete` transition | Side effects (trail capture, cleanup) |
 | `wrapToolCall(request, handler)` | On every tool call during this task | Mid-task tool gating / modification |
 | `wrapModelCall(request, handler)` | On every model call during this task | Extra prompt injection / request modification |
+| `tools` *(property)* | At middleware construction | Extra tools to register and scope to this task |
+
+## Using community middleware at task scope
+
+Standard `AgentMiddleware` instances can be passed directly to a task — they're auto-wrapped in `AgentMiddlewareAdapter`. No import needed:
+
+### Python
+
+```python
+from langchain.agents.middleware import SummarizationMiddleware
+from langchain_task_steering import Task, TaskSteeringMiddleware
+
+pipeline = TaskSteeringMiddleware(
+    tasks=[
+        Task(
+            name="research",
+            instruction="Research the topic thoroughly.",
+            tools=[search_tool],
+            middleware=SummarizationMiddleware(),  # auto-wrapped
+        ),
+        Task(
+            name="write",
+            instruction="Write the final report.",
+            tools=[write_tool],
+        ),
+    ],
+)
+```
+
+### TypeScript
+
+```typescript
+import { TaskSteeringMiddleware } from "langchain-task-steering";
+
+const pipeline = new TaskSteeringMiddleware({
+  tasks: [
+    {
+      name: "research",
+      instruction: "Research the topic thoroughly.",
+      tools: [searchTool],
+      middleware: summarizationMiddleware, // auto-wrapped
+    },
+  ],
+});
+```
+
+The adapter forwards `wrapModelCall`, `wrapToolCall`, `tools`, and `state_schema` from the inner middleware. Agent-level hooks (`beforeAgent`, `afterAgent`) are not forwarded — use `onStart` / `onComplete` for task lifecycle events. Invalid middleware objects are warned and skipped.
+
+## Middleware composition
+
+Tasks accept a list of middleware, composed like LangChain's `create_agent(middleware=[...])`:
+
+```python
+from langchain.agents.middleware import SummarizationMiddleware
+from langchain_task_steering import Task
+
+Task(
+    name="research",
+    instruction="Research the topic thoroughly.",
+    tools=[search_tool],
+    middleware=[
+        SummarizationMiddleware(),   # auto-wrapped, outermost hook wrapper
+        ResearchValidator(),         # TaskMiddleware with validate_completion
+    ],
+)
+```
+
+```typescript
+{
+  name: "research",
+  instruction: "Research the topic thoroughly.",
+  tools: [searchTool],
+  middleware: [summarizationMw, new ResearchValidator()],
+}
+```
+
+Composition semantics:
+- **Wrap-style hooks** (`wrapModelCall`, `wrapToolCall`): first = outermost wrapper.
+- **`validateCompletion`**: all validators run; first error wins.
+- **`onStart` / `onComplete`**: all fire in order.
+- **`tools`**: merged from all middleware, deduplicated.
+
+## Async support
+
+All middleware hooks have async counterparts (`awrap_model_call`, `awrap_tool_call`, `abefore_agent`, `aafter_agent` in Python). Agents using `astream()` or `ainvoke()` are fully supported. The `AgentMiddlewareAdapter` also forwards async hooks from the inner middleware.
+
+## Task-scoped skills
+
+Skills are prompt-injected capabilities loaded from `SKILL.md` files. When configured, skills are scoped per task — just like tools.
+
+`SkillsMiddleware` (in `create_deep_agent`) loads all skills into state. `TaskSteeringMiddleware` filters them per task:
+
+```python
+agent = create_deep_agent(
+    backend=my_backend,
+    skills=["/skills/user/", "/skills/project/"],
+    middleware=[
+        TaskSteeringMiddleware(
+            tasks=[
+                Task(name="research", instruction="Research the topic.",
+                     tools=[search], skills=["web-research"]),
+                Task(name="write", instruction="Write the report.",
+                     tools=[write], skills=["report-writing"]),
+            ],
+            global_skills=["general-formatting"],
+        ),
+    ],
+)
+```
+
+When skills are active, the model sees an `<available_skills>` section in the status block listing the skill name, description, and `SKILL.md` path. `read_file` and `ls` are auto-whitelisted for any task that has skills (its own or via `globalSkills`) so the model can read skill files.
+
+## Backend tools passthrough
+
+When the middleware is used alongside other middleware that contribute tools (e.g., filesystem, subagent), those tools get filtered out by tool scoping. Backend tools passthrough lets known backend tools pass through automatically.
+
+```python
+pipeline = TaskSteeringMiddleware(tasks=[...], backend_tools_passthrough=True)
+```
+
+```typescript
+const pipeline = new TaskSteeringMiddleware({ tasks: [...], backendToolsPassthrough: true })
+```
+
+`TaskSteeringMiddleware.DEFAULT_BACKEND_TOOLS` contains 14 known tool names (`ls`, `read_file`, `write_file`, `edit_file`, `glob`, `grep`, `execute`, `write_todos`, `task`, `start_async_task`, etc.). Override with `backendTools`/`backend_tools`. Inspect at runtime with `getBackendTools()`/`get_backend_tools()`.
 
 ## Configuration
 
@@ -263,6 +388,9 @@ class ThreatsMiddleware extends TaskMiddleware {
 | `enforceOrder` | `true` | Require tasks to be completed in definition order. |
 | `requiredTasks` | `["*"]` | Tasks that must be completed before the agent can exit. `["*"]` = all, `null` = none, or a list of task names. |
 | `maxNudges` | `3` | Max times the agent is nudged to complete required tasks before being allowed to exit. |
+| `globalSkills` | `[]` | Skill names available regardless of active task. |
+| `backendToolsPassthrough` | `false` | Whitelist known backend tools through the tool filter. |
+| `backendTools` | `null` | Override `DEFAULT_BACKEND_TOOLS`. `null` uses the built-in set. |
 
 ### Task fields
 
@@ -271,7 +399,8 @@ class ThreatsMiddleware extends TaskMiddleware {
 | `name` | yes | Unique identifier (used in prompts and state). |
 | `instruction` | yes | Injected into system prompt when this task is active. |
 | `tools` | yes | Tools visible when this task is `IN_PROGRESS`. |
-| `middleware` | no | Scoped `TaskMiddleware` — only active during this task. |
+| `middleware` | no | Scoped middleware — a `TaskMiddleware`, `AgentMiddleware` (auto-wrapped), or a list of them. Only active during this task. |
+| `skills` | no | Skill names available when this task is `IN_PROGRESS`. |
 
 ## Development
 
@@ -301,21 +430,32 @@ langchain-task-steering/
     python/
       src/langchain_task_steering/
         __init__.py          # Public exports
-        types.py             # Task, TaskMiddleware, TaskStatus, TaskSteeringState
-        middleware.py         # TaskSteeringMiddleware implementation
+        types.py             # Task, TaskMiddleware, TaskStatus, SkillMetadata
+        middleware.py        # TaskSteeringMiddleware + composition
+        adapter.py           # AgentMiddlewareAdapter
+        _hooks.py            # Dynamic hook discovery from AgentMiddleware
+        _skills.py           # Skill loading utilities (YAML parsing, backend I/O)
       tests/
         conftest.py          # Fixtures and mock objects
-        test_middleware.py    # Test suite
+        test_middleware.py    # Core middleware tests
+        test_skills.py       # Skill loading/parsing tests
+        test_task_skills.py  # Task-scoped skills integration tests
+        test_backend_passthrough.py  # Backend tools passthrough tests
       examples/
         simple_agent.py      # End-to-end example with Bedrock
       pyproject.toml
     typescript/
       src/
         index.ts             # Public exports
-        types.ts             # Task, TaskMiddleware, TaskStatus, interfaces
+        types.ts             # Task, TaskMiddleware, TaskStatus, SkillMetadata
         middleware.ts         # TaskSteeringMiddleware implementation
+        adapter.ts           # AgentMiddlewareAdapter
+        skills.ts            # Skill loading utilities (frontmatter parsing, backend I/O)
       tests/
-        middleware.test.ts   # Test suite
+        middleware.test.ts   # Core middleware tests
+        skills.test.ts       # Skill loading/parsing tests
+        task-skills.test.ts  # Task-scoped skills integration tests
+        backend-passthrough.test.ts  # Backend tools passthrough tests
       examples/
         simple-agent.ts      # Example usage
       package.json

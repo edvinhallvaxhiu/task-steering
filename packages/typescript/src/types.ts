@@ -18,6 +18,7 @@ export interface TaskSteeringState {
   messages: unknown[]
   taskStatuses?: Record<string, string>
   nudgeCount?: number
+  skillsMetadata?: SkillMetadata[]
   [key: string]: unknown
 }
 
@@ -81,7 +82,13 @@ export interface CommandResult {
 
 export type ToolCallHandler = (request: ToolCallRequest) => ToolMessageResult | CommandResult
 
+export type AsyncToolCallHandler = (
+  request: ToolCallRequest
+) => Promise<ToolMessageResult | CommandResult>
+
 export type ModelCallHandler = (request: ModelRequest) => ModelResponse
+
+export type AsyncModelCallHandler = (request: ModelRequest) => Promise<ModelResponse>
 
 // ── Task Middleware ───────────────────────────────────────
 
@@ -103,9 +110,45 @@ export class TaskMiddleware {
     return null
   }
 
+  /**
+   * Called after the task transitions to in_progress.
+   *
+   * Note: `state` contains the *projected* post-transition
+   * `taskStatuses` but all other fields reflect the pre-transition
+   * snapshot (the Command has not been applied to the graph yet).
+   */
   onStart(_state: Record<string, unknown>): void {}
 
+  /**
+   * Called after the task transitions to complete (after validation).
+   *
+   * Note: `state` contains the *projected* post-transition
+   * `taskStatuses` but all other fields reflect the pre-transition
+   * snapshot (the Command has not been applied to the graph yet).
+   */
   onComplete(_state: Record<string, unknown>): void {}
+
+  /**
+   * Async version of `validateCompletion`.
+   * Override for validation requiring async I/O. Default delegates to sync.
+   */
+  async aValidateCompletion(state: Record<string, unknown>): Promise<string | null> {
+    return this.validateCompletion(state)
+  }
+
+  /**
+   * Async version of `onStart`. Default delegates to sync.
+   */
+  async aOnStart(state: Record<string, unknown>): Promise<void> {
+    this.onStart(state)
+  }
+
+  /**
+   * Async version of `onComplete`. Default delegates to sync.
+   */
+  async aOnComplete(state: Record<string, unknown>): Promise<void> {
+    this.onComplete(state)
+  }
 
   wrapToolCall?(
     request: ToolCallRequest,
@@ -115,14 +158,42 @@ export class TaskMiddleware {
   wrapModelCall?(request: ModelRequest, handler: ModelCallHandler): ModelResponse
 }
 
+// ── Skill metadata ──────────────────────────────────────
+
+/**
+ * Metadata parsed from a SKILL.md frontmatter.
+ *
+ * Compatible with deepagents' `SkillMetadata` — the two are
+ * interchangeable via structural subtyping.
+ */
+export interface SkillMetadata {
+  name: string
+  description: string
+  path: string
+  license?: string | null
+  compatibility?: string | null
+  metadata?: Record<string, string>
+  allowedTools?: string[]
+}
+
 // ── Task definition ──────────────────────────────────────
 
 /**
  * A single task in an ordered pipeline.
  */
+/**
+ * Anything with optional wrapModelCall/wrapToolCall that can serve as middleware.
+ * Raw agent-level middleware objects are auto-wrapped in AgentMiddlewareAdapter.
+ */
+export type TaskMiddlewareInput =
+  | TaskMiddleware
+  | { wrapModelCall?: unknown; wrapToolCall?: unknown; tools?: ToolLike[] }
+
 export interface Task {
   name: string
   instruction: string
   tools: ToolLike[]
-  middleware?: TaskMiddleware
+  middleware?: TaskMiddlewareInput | TaskMiddlewareInput[]
+  /** Skill names available when this task is IN_PROGRESS. */
+  skills?: string[]
 }
