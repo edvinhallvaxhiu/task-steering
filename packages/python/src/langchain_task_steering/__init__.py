@@ -1,5 +1,5 @@
 from .adapter import AgentMiddlewareAdapter
-from .middleware import TaskSteeringMiddleware
+from .middleware import TaskSteeringMiddleware, WorkflowSteeringMiddleware
 from .types import (
     Task,
     TaskMiddleware,
@@ -7,6 +7,7 @@ from .types import (
     TaskSteeringState,
     SkillMetadata,
     TaskSummarization,
+    Workflow,
 )
 
 __all__ = [
@@ -18,4 +19,6 @@ __all__ = [
     "TaskSteeringMiddleware",
     "TaskSteeringState",
     "TaskSummarization",
+    "Workflow",
+    "WorkflowSteeringMiddleware",
 ]

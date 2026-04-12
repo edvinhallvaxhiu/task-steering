@@ -1,12 +1,15 @@
 """Public types for task-steering."""
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any, Literal
 
 from langchain.agents import AgentState
 from langchain.agents.middleware import AgentMiddleware
 from typing_extensions import NotRequired, TypedDict
+
+# Sentinel: "all tasks are required". Uses identity (`is`) comparison.
+_REQUIRE_ALL = ("*",)
 
 
 class TaskStatus(str, Enum):
@@ -40,6 +43,7 @@ class TaskSteeringState(AgentState):
     task_message_starts: NotRequired[dict[str, int]]
     nudge_count: NotRequired[int]
     skills_metadata: NotRequired[list[SkillMetadata]]
+    active_workflow: NotRequired[str | None]
 
 
 class TaskMiddleware(AgentMiddleware):
@@ -208,3 +212,39 @@ class Task:
     middleware: "TaskMiddleware | AgentMiddleware | list[TaskMiddleware | AgentMiddleware] | None" = None
     skills: list[str] | None = None
     summarize: "TaskSummarization | None" = None
+
+
+@dataclass
+class Workflow:
+    """A named, self-describing wrapper around a task list.
+
+    The agent sees a catalog of available workflows and activates one on
+    demand via the ``activate_workflow`` tool.
+
+    Args:
+        name: Unique workflow identifier.
+        description: Shown in the catalog view so the agent can decide
+            which workflow to activate.
+        tasks: Ordered list of :class:`Task` definitions for this workflow.
+        global_tools: Tools available across all tasks when this workflow
+            is active.
+        global_skills: Skill names available across all tasks when this
+            workflow is active.
+        enforce_order: If ``True`` (default), tasks must be completed in
+            the order they are defined within this workflow.
+        required_tasks: Task names that must be completed before the
+            workflow auto-deactivates.  Defaults to all tasks.
+        allow_deactivate_in_progress: If ``True``, the agent can
+            deactivate this workflow even while a task is in progress.
+            Default ``False`` blocks deactivation until the active task
+            is completed.
+    """
+
+    name: str
+    description: str
+    tasks: list[Task] = field(default_factory=list)
+    global_tools: list = field(default_factory=list)
+    global_skills: list[str] | None = None
+    enforce_order: bool = True
+    required_tasks: list[str] | None = _REQUIRE_ALL
+    allow_deactivate_in_progress: bool = False
