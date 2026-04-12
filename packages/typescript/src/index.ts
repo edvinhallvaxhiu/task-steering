@@ -3,11 +3,12 @@ export type { AgentMiddlewareLike } from './adapter.js'
 export { TaskSteeringMiddleware } from './middleware.js'
 export type { TaskSteeringMiddlewareConfig } from './middleware.js'
 export { parseSkillFrontmatter, loadSkillsFromBackend } from './skills.js'
-export { TaskStatus, TaskMiddleware, getContentBlocks } from './types.js'
+export { TaskStatus, TaskMiddleware, getContentBlocks, validateTaskSummarization } from './types.js'
 export type {
   Task,
   TaskMiddlewareInput,
   TaskSteeringState,
+  TaskSummarization,
   SkillMetadata,
   ContentBlock,
   SystemMessageLike,

@@ -182,9 +182,7 @@ class TaskSummarization:
 
     def __post_init__(self) -> None:
         if self.mode == "replace" and self.content is None:
-            raise ValueError(
-                "TaskSummarization(mode='replace') requires 'content'."
-            )
+            raise ValueError("TaskSummarization(mode='replace') requires 'content'.")
 
 
 @dataclass

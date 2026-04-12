@@ -4,7 +4,9 @@ import {
   TaskStatus,
   TaskMiddleware,
   getContentBlocks,
+  validateTaskSummarization,
   type Task,
+  type TaskSummarization,
   type ModelRequest,
   type ToolCallRequest,
   type ToolLike,
@@ -2147,12 +2149,19 @@ describe('Lifecycle hook state updates', () => {
     const mw = new TaskSteeringMiddleware({ tasks })
 
     const request = mockToolCallRequest({
-      toolCall: { name: 'update_task_status', args: { task: 'a', status: 'in_progress' }, id: 'call-1' },
+      toolCall: {
+        name: 'update_task_status',
+        args: { task: 'a', status: 'in_progress' },
+        id: 'call-1',
+      },
       state: { taskStatuses: { a: 'pending' } },
     })
 
     const handler = vi.fn(() => ({
-      update: { taskStatuses: { a: 'in_progress' }, messages: [{ role: 'tool', content: 'ok', toolCallId: 'call-1' }] },
+      update: {
+        taskStatuses: { a: 'in_progress' },
+        messages: [{ role: 'tool', content: 'ok', toolCallId: 'call-1' }],
+      },
     }))
     const result = mw.wrapToolCall(request, handler) as CommandResult
     expect(result.update.meta).toBe('started')
@@ -2172,12 +2181,19 @@ describe('Lifecycle hook state updates', () => {
     const mw = new TaskSteeringMiddleware({ tasks })
 
     const request = mockToolCallRequest({
-      toolCall: { name: 'update_task_status', args: { task: 'a', status: 'complete' }, id: 'call-1' },
+      toolCall: {
+        name: 'update_task_status',
+        args: { task: 'a', status: 'complete' },
+        id: 'call-1',
+      },
       state: { taskStatuses: { a: 'in_progress' } },
     })
 
     const handler = vi.fn(() => ({
-      update: { taskStatuses: { a: 'complete' }, messages: [{ role: 'tool', content: 'ok', toolCallId: 'call-1' }] },
+      update: {
+        taskStatuses: { a: 'complete' },
+        messages: [{ role: 'tool', content: 'ok', toolCallId: 'call-1' }],
+      },
     }))
     const result = mw.wrapToolCall(request, handler) as CommandResult
     expect(result.update.summary).toBe('done')
@@ -2199,7 +2215,11 @@ describe('Lifecycle hook state updates', () => {
     const mw = new TaskSteeringMiddleware({ tasks })
 
     const request = mockToolCallRequest({
-      toolCall: { name: 'update_task_status', args: { task: 'a', status: 'complete' }, id: 'call-1' },
+      toolCall: {
+        name: 'update_task_status',
+        args: { task: 'a', status: 'complete' },
+        id: 'call-1',
+      },
       state: { taskStatuses: { a: 'in_progress' } },
     })
 
@@ -2222,7 +2242,11 @@ describe('Lifecycle hook state updates', () => {
     const mw = new TaskSteeringMiddleware({ tasks })
 
     const request = mockToolCallRequest({
-      toolCall: { name: 'update_task_status', args: { task: 'a', status: 'in_progress' }, id: 'call-1' },
+      toolCall: {
+        name: 'update_task_status',
+        args: { task: 'a', status: 'in_progress' },
+        id: 'call-1',
+      },
       state: { taskStatuses: { a: 'pending' } },
     })
 
@@ -2255,7 +2279,11 @@ describe('Lifecycle hook state updates', () => {
     const mw = new TaskSteeringMiddleware({ tasks })
 
     const request = mockToolCallRequest({
-      toolCall: { name: 'update_task_status', args: { task: 'a', status: 'in_progress' }, id: 'call-1' },
+      toolCall: {
+        name: 'update_task_status',
+        args: { task: 'a', status: 'in_progress' },
+        id: 'call-1',
+      },
       state: { taskStatuses: { a: 'pending' } },
     })
 
@@ -2282,12 +2310,21 @@ describe('Lifecycle hook state updates', () => {
     }
 
     const tasks: Task[] = [
-      { name: 'a', instruction: 'A', tools: [], middleware: [new ReturnsVoid(), new ReturnsDict()] },
+      {
+        name: 'a',
+        instruction: 'A',
+        tools: [],
+        middleware: [new ReturnsVoid(), new ReturnsDict()],
+      },
     ]
     const mw = new TaskSteeringMiddleware({ tasks })
 
     const request = mockToolCallRequest({
-      toolCall: { name: 'update_task_status', args: { task: 'a', status: 'complete' }, id: 'call-1' },
+      toolCall: {
+        name: 'update_task_status',
+        args: { task: 'a', status: 'complete' },
+        id: 'call-1',
+      },
       state: { taskStatuses: { a: 'in_progress' } },
     })
 
@@ -2309,7 +2346,11 @@ describe('Lifecycle hook state updates', () => {
     const mw = new TaskSteeringMiddleware({ tasks })
 
     const request = mockToolCallRequest({
-      toolCall: { name: 'update_task_status', args: { task: 'a', status: 'in_progress' }, id: 'call-1' },
+      toolCall: {
+        name: 'update_task_status',
+        args: { task: 'a', status: 'in_progress' },
+        id: 'call-1',
+      },
       state: { taskStatuses: { a: 'pending' } },
     })
 
@@ -2332,11 +2373,17 @@ describe('Lifecycle hook state updates', () => {
       }
     }
 
-    const tasks: Task[] = [{ name: 'a', instruction: 'A', tools: [], middleware: new AsyncAppend() }]
+    const tasks: Task[] = [
+      { name: 'a', instruction: 'A', tools: [], middleware: new AsyncAppend() },
+    ]
     const mw = new TaskSteeringMiddleware({ tasks })
 
     const request = mockToolCallRequest({
-      toolCall: { name: 'update_task_status', args: { task: 'a', status: 'complete' }, id: 'call-1' },
+      toolCall: {
+        name: 'update_task_status',
+        args: { task: 'a', status: 'complete' },
+        id: 'call-1',
+      },
       state: { taskStatuses: { a: 'in_progress' } },
     })
 
@@ -2362,7 +2409,11 @@ describe('Lifecycle hook state updates', () => {
     const mw = new TaskSteeringMiddleware({ tasks })
 
     const request = mockToolCallRequest({
-      toolCall: { name: 'update_task_status', args: { task: 'a', status: 'in_progress' }, id: 'call-1' },
+      toolCall: {
+        name: 'update_task_status',
+        args: { task: 'a', status: 'in_progress' },
+        id: 'call-1',
+      },
       state: { taskStatuses: { a: 'pending' } },
     })
 
@@ -2370,5 +2421,874 @@ describe('Lifecycle hook state updates', () => {
       update: { messages: [{ role: 'tool', content: 'ok', toolCallId: 'call-1' }] },
     }))
     expect((result as CommandResult).update.fromSync).toBe(true)
+  })
+})
+
+// ════════════════════════════════════════════════════════════
+// TaskSummarization validation
+// ════════════════════════════════════════════════════════════
+
+describe('TaskSummarization validation', () => {
+  it('replace mode requires content', () => {
+    expect(() => validateTaskSummarization({ mode: 'replace' })).toThrow("requires 'content'")
+  })
+
+  it('replace mode accepts content', () => {
+    expect(() => validateTaskSummarization({ mode: 'replace', content: 'Done.' })).not.toThrow()
+  })
+
+  it('summarize mode model is optional', () => {
+    const cfg: TaskSummarization = { mode: 'summarize' }
+    expect(cfg.model).toBeUndefined()
+    expect(() => validateTaskSummarization(cfg)).not.toThrow()
+  })
+
+  it('summarize mode accepts model', () => {
+    const model = { invoke: vi.fn() }
+    const cfg: TaskSummarization = { mode: 'summarize', model }
+    expect(cfg.model).toBe(model)
+  })
+
+  it('constructor validates summarization config', () => {
+    expect(
+      () =>
+        new TaskSteeringMiddleware({
+          tasks: [
+            {
+              name: 'a',
+              instruction: 'A',
+              tools: [toolA],
+              summarize: { mode: 'replace' },
+            },
+          ],
+        })
+    ).toThrow("requires 'content'")
+  })
+})
+
+// ════════════════════════════════════════════════════════════
+// Summarization — replace mode
+// ════════════════════════════════════════════════════════════
+
+describe('Summarization — replace mode', () => {
+  function buildReplaceMw() {
+    return new TaskSteeringMiddleware({
+      tasks: [
+        {
+          name: 'a',
+          instruction: 'Do task A.',
+          tools: [toolA],
+          summarize: { mode: 'replace', content: 'Task A completed.' },
+        },
+      ],
+    })
+  }
+
+  function startTask(mw: TaskSteeringMiddleware, messages: unknown[]): CommandResult {
+    const state = { taskStatuses: { a: 'pending' }, messages: [...messages] }
+    const request = mockToolCallRequest({
+      toolCall: {
+        name: 'update_task_status',
+        args: { task: 'a', status: 'in_progress' },
+        id: 'call-start',
+      },
+      state,
+    })
+
+    const transitionMsg = {
+      role: 'tool',
+      content: "Task 'a' -> in_progress.",
+      toolCallId: 'call-start',
+    }
+    const handler = vi.fn(() => ({
+      update: {
+        taskStatuses: { a: 'in_progress' },
+        messages: [transitionMsg],
+      },
+    }))
+    const result = mw.wrapToolCall(request, handler) as CommandResult
+    expect(result.update).toBeDefined()
+    expect(result.update.taskMessageStarts).toBeDefined()
+    return result
+  }
+
+  it('records start index', () => {
+    const mw = buildReplaceMw()
+    const preMessages = [
+      { role: 'ai', content: 'hello', id: 'pre-1' },
+      { role: 'tool', content: 'world', toolCallId: 'x', id: 'pre-2' },
+      { role: 'ai', content: 'start call', id: 'pre-3' },
+    ]
+    const result = startTask(mw, preMessages)
+    expect((result.update.taskMessageStarts as Record<string, number>).a).toBe(4)
+  })
+
+  it('no start index without summarize config', () => {
+    const mw = new TaskSteeringMiddleware({
+      tasks: [{ name: 'a', instruction: 'A', tools: [toolA] }],
+    })
+    const state = { taskStatuses: { a: 'pending' }, messages: [] }
+    const request = mockToolCallRequest({
+      toolCall: {
+        name: 'update_task_status',
+        args: { task: 'a', status: 'in_progress' },
+        id: 'call-1',
+      },
+      state,
+    })
+    const handler = vi.fn(() => ({
+      update: {
+        taskStatuses: { a: 'in_progress' },
+        messages: [{ role: 'tool', content: 'ok', toolCallId: 'call-1' }],
+      },
+    }))
+    const result = mw.wrapToolCall(request, handler) as CommandResult
+    expect(result.update.taskMessageStarts).toBeUndefined()
+  })
+
+  it('replace removes all task messages and injects summary', () => {
+    const mw = buildReplaceMw()
+
+    const taskWork = [
+      { role: 'ai', content: 'thinking...', id: 'work-1' },
+      { role: 'tool', content: 'tool result', toolCallId: 'tc-1', id: 'work-2' },
+      { role: 'ai', content: 'more thinking', id: 'work-3' },
+    ]
+    const completeAi = {
+      role: 'ai',
+      content: '',
+      id: 'complete-ai',
+      tool_calls: [
+        {
+          name: 'update_task_status',
+          args: { task: 'a', status: 'complete' },
+          id: 'call-done',
+        },
+      ],
+    }
+
+    const messages = [
+      { role: 'ai', content: 'pre-task', id: 'pre-1' },
+      { role: 'tool', content: 'pre-task', toolCallId: 'x', id: 'pre-2' },
+      { role: 'ai', content: 'start call', id: 'pre-3' },
+      {
+        role: 'tool',
+        content: "Task 'a' -> in_progress.",
+        toolCallId: 'call-start',
+        id: 'pre-4',
+      },
+      ...taskWork,
+      completeAi,
+    ]
+
+    const state = {
+      taskStatuses: { a: 'in_progress' },
+      taskMessageStarts: { a: 4 },
+      messages,
+    }
+
+    const request = mockToolCallRequest({
+      toolCall: {
+        name: 'update_task_status',
+        args: { task: 'a', status: 'complete' },
+        id: 'call-done',
+      },
+      state,
+    })
+
+    const transitionMsg = {
+      role: 'tool',
+      content: "Task 'a' -> complete.",
+      toolCallId: 'call-done',
+    }
+    const handler = vi.fn(() => ({
+      update: {
+        taskStatuses: { a: 'complete' },
+        messages: [transitionMsg],
+      },
+    }))
+    const result = mw.wrapToolCall(request, handler) as CommandResult
+
+    const resultMsgs = result.update.messages as Array<Record<string, unknown>>
+
+    // Remove ops for all 3 task work messages
+    const removeOps = resultMsgs.filter((m) => m._remove === true)
+    expect(removeOps).toHaveLength(3)
+    expect(new Set(removeOps.map((r) => r.id))).toEqual(new Set(['work-1', 'work-2', 'work-3']))
+
+    // Summary injected into the transition ToolMessage
+    const toolMsgs = resultMsgs.filter((m) => m.role === 'tool')
+    expect(toolMsgs).toHaveLength(1)
+    expect(toolMsgs[0].content).toContain("Task 'a' -> complete.")
+    expect(toolMsgs[0].content).toContain('Task A completed.')
+
+    // Trim op: AIMessage with empty content replaces the complete AIMessage
+    const aiMsgs = resultMsgs.filter((m) => m.role === 'ai')
+    expect(aiMsgs).toHaveLength(1)
+    expect(aiMsgs[0].content).toBe('')
+    expect(aiMsgs[0].id).toBe('complete-ai')
+  })
+
+  it('noop when no summarize start index', () => {
+    const mw = buildReplaceMw()
+
+    const completeAi = {
+      role: 'ai',
+      content: '',
+      id: 'complete-ai',
+      tool_calls: [
+        {
+          name: 'update_task_status',
+          args: { task: 'a', status: 'complete' },
+          id: 'call-done',
+        },
+      ],
+    }
+
+    const state = {
+      taskStatuses: { a: 'in_progress' },
+      // No taskMessageStarts entry
+      messages: [
+        {
+          role: 'tool',
+          content: "Task 'a' -> in_progress.",
+          toolCallId: 'call-start',
+          id: 'pre-1',
+        },
+        completeAi,
+      ],
+    }
+
+    const request = mockToolCallRequest({
+      toolCall: {
+        name: 'update_task_status',
+        args: { task: 'a', status: 'complete' },
+        id: 'call-done',
+      },
+      state,
+    })
+
+    const transitionMsg = {
+      role: 'tool',
+      content: "Task 'a' -> complete.",
+      toolCallId: 'call-done',
+    }
+    const handler = vi.fn(() => ({
+      update: {
+        taskStatuses: { a: 'complete' },
+        messages: [transitionMsg],
+      },
+    }))
+    const result = mw.wrapToolCall(request, handler) as CommandResult
+
+    const resultMsgs = result.update.messages as Array<Record<string, unknown>>
+    // No remove ops — summarization was skipped
+    expect(resultMsgs.filter((m) => m._remove === true)).toHaveLength(0)
+    // Only the transition message
+    expect(resultMsgs.filter((m) => m.role === 'tool')).toHaveLength(1)
+    expect(
+      (resultMsgs.filter((m) => m.role === 'tool')[0] as Record<string, unknown>).content
+    ).toBe("Task 'a' -> complete.")
+  })
+})
+
+// ════════════════════════════════════════════════════════════
+// Summarization — summarize mode
+// ════════════════════════════════════════════════════════════
+
+describe('Summarization — summarize mode', () => {
+  function buildSummarizeMw(mockModel: unknown) {
+    return new TaskSteeringMiddleware({
+      tasks: [
+        {
+          name: 'a',
+          instruction: 'Gather requirements.',
+          tools: [toolA],
+          summarize: { mode: 'summarize', model: mockModel },
+        },
+      ],
+    })
+  }
+
+  it('calls model and replaces AI/Tool messages', () => {
+    const mockModel = {
+      invoke: vi.fn(() => ({ content: 'Summary: gathered 3 items.' })),
+    }
+
+    const mw = buildSummarizeMw(mockModel)
+
+    const taskWork = [
+      { role: 'ai', content: 'Let me gather items.', id: 'work-1' },
+      { role: 'tool', content: 'Added 3 items.', toolCallId: 'tc-1', id: 'work-2' },
+      { role: 'human', content: 'User message.', id: 'human-1' },
+      { role: 'ai', content: 'Got it.', id: 'work-3' },
+    ]
+    const completeAi = {
+      role: 'ai',
+      content: '',
+      id: 'complete-ai',
+      tool_calls: [
+        {
+          name: 'update_task_status',
+          args: { task: 'a', status: 'complete' },
+          id: 'call-done',
+        },
+      ],
+    }
+
+    const messages = [
+      {
+        role: 'tool',
+        content: "Task 'a' -> in_progress.",
+        toolCallId: 'call-start',
+        id: 'pre-1',
+      },
+      ...taskWork,
+      completeAi,
+    ]
+
+    const state = {
+      taskStatuses: { a: 'in_progress' },
+      taskMessageStarts: { a: 1 },
+      messages,
+    }
+
+    const request = mockToolCallRequest({
+      toolCall: {
+        name: 'update_task_status',
+        args: { task: 'a', status: 'complete' },
+        id: 'call-done',
+      },
+      state,
+    })
+
+    const transitionMsg = {
+      role: 'tool',
+      content: "Task 'a' -> complete.",
+      toolCallId: 'call-done',
+    }
+    const handler = vi.fn(() => ({
+      update: {
+        taskStatuses: { a: 'complete' },
+        messages: [transitionMsg],
+      },
+    }))
+    const result = mw.wrapToolCall(request, handler) as CommandResult
+
+    // Model was called
+    expect(mockModel.invoke).toHaveBeenCalledOnce()
+    const callMessages = mockModel.invoke.mock.calls[0][0] as Array<Record<string, unknown>>
+    // System message with task info
+    expect(callMessages[0].content).toContain('Gather requirements.')
+    expect(callMessages[0].content).toContain('Task name: a')
+    // Last message is the human prompt
+    expect(callMessages[callMessages.length - 1].role).toBe('human')
+
+    const resultMsgs = result.update.messages as Array<Record<string, unknown>>
+
+    // Only AI/Tool task work removed (not the human_msg, not complete-ai)
+    const removeOps = resultMsgs.filter((m) => m._remove === true)
+    expect(new Set(removeOps.map((r) => r.id))).toEqual(new Set(['work-1', 'work-2', 'work-3']))
+
+    // Summary injected into the transition ToolMessage
+    const toolMsgs = resultMsgs.filter((m) => m.role === 'tool')
+    expect(toolMsgs).toHaveLength(1)
+    expect(toolMsgs[0].content).toContain('Summary: gathered 3 items.')
+    expect(toolMsgs[0].content).toContain("Task 'a' -> complete.")
+
+    // Trim op: complete AIMessage text stripped
+    const aiMsgs = resultMsgs.filter((m) => m.role === 'ai')
+    expect(aiMsgs).toHaveLength(1)
+    expect(aiMsgs[0].content).toBe('')
+    expect(aiMsgs[0].id).toBe('complete-ai')
+  })
+
+  it('custom prompt overrides default human message', () => {
+    const mockModel = {
+      invoke: vi.fn(() => ({ content: 'Custom summary.' })),
+    }
+
+    const custom = 'List every tool call and its result.'
+    const mw = new TaskSteeringMiddleware({
+      tasks: [
+        {
+          name: 'a',
+          instruction: 'Gather requirements.',
+          tools: [toolA],
+          summarize: { mode: 'summarize', model: mockModel, prompt: custom },
+        },
+      ],
+    })
+
+    const taskWork = [{ role: 'ai', content: 'working', id: 'w-1' }]
+    const completeAi = {
+      role: 'ai',
+      content: '',
+      id: 'c-ai',
+      tool_calls: [
+        {
+          name: 'update_task_status',
+          args: { task: 'a', status: 'complete' },
+          id: 'call-done',
+        },
+      ],
+    }
+
+    const state = {
+      taskStatuses: { a: 'in_progress' },
+      taskMessageStarts: { a: 0 },
+      messages: [...taskWork, completeAi],
+    }
+
+    const request = mockToolCallRequest({
+      toolCall: {
+        name: 'update_task_status',
+        args: { task: 'a', status: 'complete' },
+        id: 'call-done',
+      },
+      state,
+    })
+
+    mw.wrapToolCall(
+      request,
+      vi.fn(() => ({
+        update: {
+          taskStatuses: { a: 'complete' },
+          messages: [{ role: 'tool', content: 'ok', toolCallId: 'call-done' }],
+        },
+      }))
+    )
+
+    const callMessages = mockModel.invoke.mock.calls[0][0] as Array<Record<string, unknown>>
+    expect(callMessages[0].content).toContain('Task name: a')
+    const humanMsg = callMessages[callMessages.length - 1]
+    expect(humanMsg.role).toBe('human')
+    expect(humanMsg.content).toBe(custom)
+  })
+
+  it('model falls back to middleware model', () => {
+    const mockModel = {
+      invoke: vi.fn(() => ({ content: 'Fallback summary.' })),
+    }
+
+    const mw = new TaskSteeringMiddleware({
+      tasks: [
+        {
+          name: 'a',
+          instruction: 'Do stuff.',
+          tools: [toolA],
+          summarize: { mode: 'summarize' },
+        },
+      ],
+      model: mockModel,
+    })
+
+    const taskWork = [{ role: 'ai', content: 'working', id: 'w-1' }]
+    const completeAi = {
+      role: 'ai',
+      content: '',
+      id: 'c-ai',
+      tool_calls: [
+        {
+          name: 'update_task_status',
+          args: { task: 'a', status: 'complete' },
+          id: 'call-done',
+        },
+      ],
+    }
+
+    const state = {
+      taskStatuses: { a: 'in_progress' },
+      taskMessageStarts: { a: 0 },
+      messages: [...taskWork, completeAi],
+    }
+
+    const request = mockToolCallRequest({
+      toolCall: {
+        name: 'update_task_status',
+        args: { task: 'a', status: 'complete' },
+        id: 'call-done',
+      },
+      state,
+    })
+
+    const result = mw.wrapToolCall(
+      request,
+      vi.fn(() => ({
+        update: {
+          taskStatuses: { a: 'complete' },
+          messages: [{ role: 'tool', content: 'ok', toolCallId: 'call-done' }],
+        },
+      }))
+    ) as CommandResult
+
+    expect(mockModel.invoke).toHaveBeenCalledOnce()
+    const toolMsgs = (result.update.messages as Array<Record<string, unknown>>).filter(
+      (m) => m.role === 'tool'
+    )
+    expect(toolMsgs[0].content).toContain('Fallback summary.')
+  })
+
+  it('skips summarization when no model anywhere', () => {
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {})
+
+    const mw = new TaskSteeringMiddleware({
+      tasks: [
+        {
+          name: 'a',
+          instruction: 'Do stuff.',
+          tools: [toolA],
+          summarize: { mode: 'summarize' },
+        },
+      ],
+    })
+
+    const taskWork = [{ role: 'ai', content: 'working', id: 'w-1' }]
+    const completeAi = {
+      role: 'ai',
+      content: '',
+      id: 'c-ai',
+      tool_calls: [
+        {
+          name: 'update_task_status',
+          args: { task: 'a', status: 'complete' },
+          id: 'call-done',
+        },
+      ],
+    }
+
+    const state = {
+      taskStatuses: { a: 'in_progress' },
+      taskMessageStarts: { a: 0 },
+      messages: [...taskWork, completeAi],
+    }
+
+    const request = mockToolCallRequest({
+      toolCall: {
+        name: 'update_task_status',
+        args: { task: 'a', status: 'complete' },
+        id: 'call-done',
+      },
+      state,
+    })
+
+    const transitionMsg = { role: 'tool', content: 'ok', toolCallId: 'call-done' }
+    const result = mw.wrapToolCall(
+      request,
+      vi.fn(() => ({
+        update: {
+          taskStatuses: { a: 'complete' },
+          messages: [transitionMsg],
+        },
+      }))
+    ) as CommandResult
+
+    const resultMsgs = result.update.messages as Array<Record<string, unknown>>
+    // No remove ops — summarization was skipped
+    expect(resultMsgs.filter((m) => m._remove === true)).toHaveLength(0)
+    // No AI trim ops
+    expect(resultMsgs.filter((m) => m.role === 'ai')).toHaveLength(0)
+
+    expect(warnSpy).toHaveBeenCalledOnce()
+    expect(warnSpy.mock.calls[0][0]).toContain('no model configured')
+
+    warnSpy.mockRestore()
+  })
+
+  it('no summarization without config', () => {
+    const mw = new TaskSteeringMiddleware({
+      tasks: [{ name: 'a', instruction: 'A', tools: [toolA] }],
+    })
+
+    const state = {
+      taskStatuses: { a: 'in_progress' },
+      messages: [
+        { role: 'ai', content: 'work', id: 'w-1' },
+        {
+          role: 'ai',
+          content: '',
+          id: 'c-ai',
+          tool_calls: [
+            {
+              name: 'update_task_status',
+              args: { task: 'a', status: 'complete' },
+              id: 'call-done',
+            },
+          ],
+        },
+      ],
+    }
+
+    const request = mockToolCallRequest({
+      toolCall: {
+        name: 'update_task_status',
+        args: { task: 'a', status: 'complete' },
+        id: 'call-done',
+      },
+      state,
+    })
+
+    const transitionMsg = {
+      role: 'tool',
+      content: "Task 'a' -> complete.",
+      toolCallId: 'call-done',
+    }
+    const result = mw.wrapToolCall(
+      request,
+      vi.fn(() => ({
+        update: {
+          taskStatuses: { a: 'complete' },
+          messages: [transitionMsg],
+        },
+      }))
+    ) as CommandResult
+
+    const resultMsgs = result.update.messages as Array<Record<string, unknown>>
+    // No remove ops
+    expect(resultMsgs.filter((m) => m._remove === true)).toHaveLength(0)
+    // No AI trim ops
+    expect(resultMsgs.filter((m) => m.role === 'ai')).toHaveLength(0)
+  })
+})
+
+// ════════════════════════════════════════════════════════════
+// Summarization — async
+// ════════════════════════════════════════════════════════════
+
+describe('Summarization — async', () => {
+  it('async summarize uses ainvoke', async () => {
+    const mockModel = {
+      ainvoke: vi.fn(async () => ({ content: 'Async summary.' })),
+    }
+
+    const mw = new TaskSteeringMiddleware({
+      tasks: [
+        {
+          name: 'a',
+          instruction: 'Do stuff.',
+          tools: [toolA],
+          summarize: { mode: 'summarize', model: mockModel },
+        },
+      ],
+    })
+
+    const taskWork = [{ role: 'ai', content: 'working', id: 'w-1' }]
+    const completeAi = {
+      role: 'ai',
+      content: '',
+      id: 'c-ai',
+      tool_calls: [
+        {
+          name: 'update_task_status',
+          args: { task: 'a', status: 'complete' },
+          id: 'call-done',
+        },
+      ],
+    }
+
+    const state = {
+      taskStatuses: { a: 'in_progress' },
+      taskMessageStarts: { a: 0 },
+      messages: [...taskWork, completeAi],
+    }
+
+    const request = mockToolCallRequest({
+      toolCall: {
+        name: 'update_task_status',
+        args: { task: 'a', status: 'complete' },
+        id: 'call-done',
+      },
+      state,
+    })
+
+    const transitionMsg = { role: 'tool', content: 'ok', toolCallId: 'call-done' }
+
+    const result = await mw.awrapToolCall(request, async () => ({
+      update: {
+        taskStatuses: { a: 'complete' },
+        messages: [transitionMsg],
+      },
+    }))
+
+    const resultMsgs = (result as CommandResult).update.messages as Array<Record<string, unknown>>
+    const toolMsgs = resultMsgs.filter((m) => m.role === 'tool')
+    expect(toolMsgs).toHaveLength(1)
+    expect(toolMsgs[0].content).toContain('Async summary.')
+  })
+
+  it('async replace mode', async () => {
+    const mw = new TaskSteeringMiddleware({
+      tasks: [
+        {
+          name: 'a',
+          instruction: 'Do stuff.',
+          tools: [toolA],
+          summarize: { mode: 'replace', content: 'Done.' },
+        },
+      ],
+    })
+
+    const taskWork = [{ role: 'ai', content: 'working', id: 'w-1' }]
+    const completeAi = {
+      role: 'ai',
+      content: '',
+      id: 'c-ai',
+      tool_calls: [
+        {
+          name: 'update_task_status',
+          args: { task: 'a', status: 'complete' },
+          id: 'call-done',
+        },
+      ],
+    }
+
+    const state = {
+      taskStatuses: { a: 'in_progress' },
+      taskMessageStarts: { a: 0 },
+      messages: [...taskWork, completeAi],
+    }
+
+    const request = mockToolCallRequest({
+      toolCall: {
+        name: 'update_task_status',
+        args: { task: 'a', status: 'complete' },
+        id: 'call-done',
+      },
+      state,
+    })
+
+    const transitionMsg = { role: 'tool', content: 'ok', toolCallId: 'call-done' }
+    const result = await mw.awrapToolCall(request, async () => ({
+      update: {
+        taskStatuses: { a: 'complete' },
+        messages: [transitionMsg],
+      },
+    }))
+
+    const resultMsgs = (result as CommandResult).update.messages as Array<Record<string, unknown>>
+    const toolMsgs = resultMsgs.filter((m) => m.role === 'tool')
+    expect(toolMsgs).toHaveLength(1)
+    expect(toolMsgs[0].content).toContain('Done.')
+
+    const removeOps = resultMsgs.filter((m) => m._remove === true)
+    expect(removeOps).toHaveLength(1)
+    expect(removeOps[0].id).toBe('w-1')
+  })
+})
+
+// ════════════════════════════════════════════════════════════
+// _flattenForSummary and _buildSummaryMessages
+// ════════════════════════════════════════════════════════════
+
+describe('_flattenForSummary', () => {
+  it('converts AI message with tool_calls to text', () => {
+    const messages = [
+      {
+        role: 'ai',
+        content: 'Let me search.',
+        tool_calls: [{ name: 'search', args: { q: 'test' } }],
+      },
+    ]
+    const flat = (TaskSteeringMiddleware as unknown as Record<string, Function>)._flattenForSummary(
+      messages
+    )
+    expect(flat).toHaveLength(1)
+    expect(flat[0].role).toBe('ai')
+    expect(flat[0].content).toContain('Let me search.')
+    expect(flat[0].content).toContain('[called search(')
+  })
+
+  it('converts ToolMessage to human with prefix', () => {
+    const messages = [
+      { role: 'tool', content: 'Found 3 results.', name: 'search', toolCallId: 'tc-1' },
+    ]
+    const flat = (TaskSteeringMiddleware as unknown as Record<string, Function>)._flattenForSummary(
+      messages
+    )
+    expect(flat).toHaveLength(1)
+    expect(flat[0].role).toBe('human')
+    expect(flat[0].content).toContain('[search result]: Found 3 results.')
+  })
+
+  it('handles block-style content', () => {
+    const messages = [
+      {
+        role: 'ai',
+        content: [
+          { type: 'text', text: 'Block content' },
+          { type: 'image', data: 'binary' },
+        ],
+      },
+    ]
+    const flat = (TaskSteeringMiddleware as unknown as Record<string, Function>)._flattenForSummary(
+      messages
+    )
+    expect(flat).toHaveLength(1)
+    expect(flat[0].content).toBe('Block content')
+  })
+
+  it('skips empty AI messages', () => {
+    const messages = [{ role: 'ai', content: '' }]
+    const flat = (TaskSteeringMiddleware as unknown as Record<string, Function>)._flattenForSummary(
+      messages
+    )
+    expect(flat).toHaveLength(0)
+  })
+
+  it('preserves human messages', () => {
+    const messages = [{ role: 'human', content: 'User said something.' }]
+    const flat = (TaskSteeringMiddleware as unknown as Record<string, Function>)._flattenForSummary(
+      messages
+    )
+    expect(flat).toHaveLength(1)
+    expect(flat[0].role).toBe('human')
+    expect(flat[0].content).toBe('User said something.')
+  })
+
+  it('tool message without name defaults to "tool"', () => {
+    const messages = [{ role: 'tool', content: 'result', toolCallId: 'tc-1' }]
+    const flat = (TaskSteeringMiddleware as unknown as Record<string, Function>)._flattenForSummary(
+      messages
+    )
+    expect(flat[0].content).toContain('[tool result]:')
+  })
+})
+
+describe('_buildSummaryMessages', () => {
+  it('builds system + flattened + human', () => {
+    const task: Task = { name: 'test_task', instruction: 'Do the thing.', tools: [] }
+    const cfg: TaskSummarization = { mode: 'summarize' }
+    const taskMessages = [
+      { role: 'ai', content: 'Working on it.', id: 'w-1' },
+      { role: 'tool', content: 'Done.', name: 'my_tool', toolCallId: 'tc-1', id: 'w-2' },
+    ]
+
+    const msgs = (
+      TaskSteeringMiddleware as unknown as Record<string, Function>
+    )._buildSummaryMessages(task, cfg, taskMessages) as Array<Record<string, unknown>>
+
+    // System message
+    expect(msgs[0].role).toBe('system')
+    expect(msgs[0].content).toContain('Task name: test_task')
+    expect(msgs[0].content).toContain('Do the thing.')
+
+    // Last message is human prompt
+    expect(msgs[msgs.length - 1].role).toBe('human')
+    expect(msgs[msgs.length - 1].content).toContain('concise summary')
+
+    // Middle messages are flattened task work
+    expect(msgs.length).toBeGreaterThan(2)
+  })
+
+  it('uses custom prompt', () => {
+    const task: Task = { name: 'a', instruction: 'A', tools: [] }
+    const cfg: TaskSummarization = { mode: 'summarize', prompt: 'Custom prompt.' }
+    const taskMessages = [{ role: 'ai', content: 'work', id: 'w-1' }]
+
+    const msgs = (
+      TaskSteeringMiddleware as unknown as Record<string, Function>
+    )._buildSummaryMessages(task, cfg, taskMessages) as Array<Record<string, unknown>>
+
+    expect(msgs[msgs.length - 1].content).toBe('Custom prompt.')
   })
 })

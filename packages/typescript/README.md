@@ -120,6 +120,61 @@ PENDING ──> IN_PROGRESS ──> COMPLETE
 - When `enforceOrder` is true, a task cannot start until all preceding tasks are complete.
 - On `complete`, the task's `middleware.validateCompletion(state)` runs first — rejection returns an error to the agent without completing the transition.
 
+## Task summarization
+
+When a task completes, its intermediate messages (tool calls, tool results, reasoning) can be compressed to save context window space. Two modes are available:
+
+- **`replace`** — removes all task messages, injects a static string into the transition `ToolMessage`.
+- **`summarize`** — calls an LLM to produce a summary, injects it into the transition `ToolMessage`. Only AI/Tool messages are removed; human messages are preserved.
+
+```typescript
+import { TaskSteeringMiddleware, type TaskSummarization } from 'langchain-task-steering'
+
+const pipeline = new TaskSteeringMiddleware({
+  tasks: [
+    {
+      name: 'research',
+      instruction: 'Research the topic.',
+      tools: [searchTool],
+      summarize: {
+        mode: 'summarize',
+        // model is optional — falls back to middleware's model
+        // prompt is optional — overrides the default HumanMessage
+        // prompt: 'Summarize in bullet points.',
+      },
+    },
+    {
+      name: 'write',
+      instruction: 'Write the report.',
+      tools: [writeTool],
+      summarize: { mode: 'replace', content: 'Research complete.' },
+    },
+  ],
+  model: chatModel, // default model for summarize mode
+})
+```
+
+### How it works
+
+1. When a task transitions to `in_progress`, the middleware records the current message index in `taskMessageStarts`.
+2. When the task transitions to `complete`, messages between the start index and the completion are processed:
+   - **Replace**: all task messages are removed.
+   - **Summarize**: AI/Tool messages are removed; the LLM receives a system message (with task name + instruction), the flattened task messages (tool metadata stripped to plain text), and a human message instruction.
+3. The summary is injected into the transition tool message (e.g., `Task 'research' -> complete.\n\nTask summary:\n...`).
+4. By default, the text content of the complete-transition AI message is also stripped (`trimCompleteMessage: true`), since it's redundant once the summary exists.
+
+The `model` for `summarize` mode is resolved in order: `TaskSummarization.model` > `TaskSteeringMiddlewareConfig.model`. If neither is set, summarization is skipped with a warning.
+
+### TaskSummarization fields
+
+| Field                 | Default     | Description                                            |
+| --------------------- | ----------- | ------------------------------------------------------ |
+| `mode`                | `'replace'` | `'replace'` or `'summarize'`.                          |
+| `content`             | —           | Replacement text for `replace` mode (required).        |
+| `model`               | `undefined` | Chat model for `summarize` mode. Falls back to config. |
+| `prompt`              | `undefined` | Custom human message content for the summarizer.       |
+| `trimCompleteMessage` | `true`      | Strip text from the complete-transition AI message.    |
+
 ## Task-scoped middleware
 
 Each task can have a `TaskMiddleware` that activates only when the task is `IN_PROGRESS`. This enables mid-task enforcement, not just completion gating.
@@ -319,6 +374,7 @@ const pipeline = new TaskSteeringMiddleware({
   globalSkills: [],                // skill names available in all tasks
   backendToolsPassthrough: false,  // whitelist known backend tools
   backendTools: null,              // override DEFAULT_BACKEND_TOOLS
+  model: chatModel,                // default model for TaskSummarization
 })
 ```
 
@@ -331,6 +387,7 @@ const pipeline = new TaskSteeringMiddleware({
 | `tools`       | yes      | Tools visible when this task is `IN_PROGRESS`.                                                                                   |
 | `middleware`  | no       | Scoped middleware — a `TaskMiddleware`, agent middleware object (auto-wrapped), or a list of them. Only active during this task. |
 | `skills`      | no       | Skill names available when this task is `IN_PROGRESS`. Skill metadata comes from state (loaded by `SkillsMiddleware`).           |
+| `summarize`   | no       | Post-completion summarization config. See [Task summarization](#task-summarization).                                             |
 
 ## Agent integration
 

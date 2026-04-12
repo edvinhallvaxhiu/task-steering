@@ -218,7 +218,10 @@ describe('Skill rendering', () => {
     expect(block).toContain('<available_skills>')
     expect(block).toContain('web-research')
     expect(block).toContain('formatting')
-    expect(block).not.toContain('other')
+    // "other" skill should not appear in available_skills
+    // (the word "other" appears in skill_usage boilerplate, so check specifically)
+    expect(block).not.toContain('other:')
+    expect(block).not.toContain('/skills/other/')
   })
 
   it('no skills section when feature inactive', () => {

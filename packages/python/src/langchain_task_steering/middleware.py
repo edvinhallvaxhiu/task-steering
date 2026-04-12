@@ -9,7 +9,13 @@ from typing import Annotated, Any
 
 from langchain.agents.middleware import AgentMiddleware, ModelRequest, ModelResponse
 from langchain.agents.middleware import hook_config
-from langchain.messages import AIMessage, HumanMessage, RemoveMessage, SystemMessage, ToolMessage
+from langchain.messages import (
+    AIMessage,
+    HumanMessage,
+    RemoveMessage,
+    SystemMessage,
+    ToolMessage,
+)
 from langchain.tools import tool, ToolRuntime
 from langchain.tools.tool_node import ToolCallRequest
 from langgraph.runtime import Runtime
@@ -17,7 +23,13 @@ from langgraph.types import Command
 from typing_extensions import TypedDict
 
 from ._hooks import WRAP_HOOK_PAIRS, overrides_base
-from .types import Task, TaskMiddleware, TaskStatus, TaskSteeringState, TaskSummarization
+from .types import (
+    Task,
+    TaskMiddleware,
+    TaskStatus,
+    TaskSteeringState,
+    TaskSummarization,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -981,8 +993,7 @@ class TaskSteeringMiddleware(AgentMiddleware[TaskSteeringState]):
 
         if cfg.mode == "replace":
             remove_ops = [
-                RemoveMessage(id=m.id) for m in task_messages
-                if getattr(m, "id", None)
+                RemoveMessage(id=m.id) for m in task_messages if getattr(m, "id", None)
             ]
         else:
             if model is None:
@@ -1027,12 +1038,16 @@ class TaskSteeringMiddleware(AgentMiddleware[TaskSteeringState]):
             messages = state.get("messages", [])
             if messages:
                 complete_ai = messages[-1]
-                if isinstance(complete_ai, AIMessage) and getattr(complete_ai, "id", None):
-                    trim_ops = [AIMessage(
-                        content="",
-                        id=complete_ai.id,
-                        tool_calls=getattr(complete_ai, "tool_calls", []),
-                    )]
+                if isinstance(complete_ai, AIMessage) and getattr(
+                    complete_ai, "id", None
+                ):
+                    trim_ops = [
+                        AIMessage(
+                            content="",
+                            id=complete_ai.id,
+                            tool_calls=getattr(complete_ai, "tool_calls", []),
+                        )
+                    ]
 
         update["messages"] = [*remove_ops, *trim_ops, *existing_msgs]
 
@@ -1055,8 +1070,8 @@ class TaskSteeringMiddleware(AgentMiddleware[TaskSteeringState]):
         if cfg.mode == "replace":
             summary = cfg.content
         else:
-            system, human = self._build_summary_prompt(task, cfg)
-            response = model.invoke([system, *task_messages, human])
+            invoke_msgs = self._build_summary_messages(task, cfg, task_messages)
+            response = model.invoke(invoke_msgs)
             summary = response.content
 
         return self._finalize_summarization(
@@ -1076,8 +1091,8 @@ class TaskSteeringMiddleware(AgentMiddleware[TaskSteeringState]):
         if cfg.mode == "replace":
             summary = cfg.content
         else:
-            system, human = self._build_summary_prompt(task, cfg)
-            response = await model.ainvoke([system, *task_messages, human])
+            invoke_msgs = self._build_summary_messages(task, cfg, task_messages)
+            response = await model.ainvoke(invoke_msgs)
             summary = response.content
 
         return self._finalize_summarization(
@@ -1085,10 +1100,42 @@ class TaskSteeringMiddleware(AgentMiddleware[TaskSteeringState]):
         )
 
     @staticmethod
-    def _build_summary_prompt(
-        task: Task, cfg: TaskSummarization
-    ) -> tuple[SystemMessage, HumanMessage]:
-        """Build the system + human messages for the summarization LLM call."""
+    def _flatten_for_summary(task_messages: list) -> list[HumanMessage | AIMessage]:
+        """Convert task messages to plain text for the summarization LLM.
+
+        Strips tool_calls / tool_call_id metadata so providers like Bedrock
+        don't warn about tool_use blocks without toolConfig.
+        """
+        flat: list = []
+        for m in task_messages:
+            content = getattr(m, "content", "")
+            if isinstance(content, list):
+                text = "\n".join(
+                    b["text"]
+                    for b in content
+                    if isinstance(b, dict) and b.get("type") == "text"
+                )
+            else:
+                text = str(content)
+
+            if isinstance(m, AIMessage):
+                # Include tool call names/args as text
+                for tc in getattr(m, "tool_calls", []):
+                    text += f"\n[called {tc.get('name', '?')}({tc.get('args', {})})]"
+                if text.strip():
+                    flat.append(AIMessage(content=text.strip()))
+            elif isinstance(m, ToolMessage):
+                name = getattr(m, "name", None) or "tool"
+                flat.append(HumanMessage(content=f"[{name} result]: {text}"))
+            elif text.strip():
+                flat.append(HumanMessage(content=text.strip()))
+        return flat
+
+    @staticmethod
+    def _build_summary_messages(
+        task: Task, cfg: TaskSummarization, task_messages: list
+    ) -> list:
+        """Build the full message list for the summarization LLM call."""
         system = SystemMessage(
             content=(
                 "You are summarizing a completed agent task.\n\n"
@@ -1101,7 +1148,8 @@ class TaskSteeringMiddleware(AgentMiddleware[TaskSteeringState]):
             if cfg.prompt is not None
             else "Provide a concise summary of what was accomplished."
         )
-        return system, human
+        flat = TaskSteeringMiddleware._flatten_for_summary(task_messages)
+        return [system, *flat, human]
 
     def _build_transition_tool(self):
         """Build the update_task_status tool with closure over pipeline config."""

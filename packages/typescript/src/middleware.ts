@@ -6,9 +6,11 @@ import {
   TaskStatus,
   TaskMiddleware,
   getContentBlocks,
+  validateTaskSummarization,
   type Task,
   type TaskMiddlewareInput,
   type TaskSteeringState,
+  type TaskSummarization,
   type SkillMetadata,
   type ToolLike,
   type ModelRequest,
@@ -39,6 +41,12 @@ export interface TaskSteeringMiddlewareConfig {
   backendTools?: ReadonlySet<string> | null
   /** Skill names available regardless of active task. */
   globalSkills?: string[]
+  /**
+   * Default chat model for `TaskSummarization(mode="summarize")`.
+   * Used when a task's `summarize.model` is not set. Any object with
+   * `invoke(messages)` / `ainvoke(messages)` returning `{ content: string }`.
+   */
+  model?: unknown
 }
 
 /**
@@ -88,6 +96,9 @@ export class TaskSteeringMiddleware {
   private readonly _requiredTasks: Set<string>
   private readonly _transitionTool: ToolLike
 
+  // Summarization model fallback
+  private readonly _model: unknown
+
   // Backend tools passthrough
   private _backendToolsPassthrough: boolean
   private readonly _backendTools: ReadonlySet<string>
@@ -110,6 +121,7 @@ export class TaskSteeringMiddleware {
       backendToolsPassthrough = false,
       backendTools = null,
       globalSkills = [],
+      model = null,
     } = config
 
     if (tasks.length === 0) {
@@ -130,12 +142,20 @@ export class TaskSteeringMiddleware {
       task.tools = [...task.tools]
     }
 
+    // Validate summarization configs
+    for (const task of tasksCopy) {
+      if (task.summarize) {
+        validateTaskSummarization(task.summarize)
+      }
+    }
+
     this._tasks = tasksCopy
     this._taskOrder = tasksCopy.map((t) => t.name)
     this._taskMap = new Map(tasksCopy.map((t) => [t.name, t]))
     this._globalTools = globalTools
     this._enforceOrder = enforceOrder
     this._maxNudges = maxNudges
+    this._model = model
 
     // Resolve required tasks
     if (requiredTasks !== null && requiredTasks.includes('*')) {
@@ -317,6 +337,7 @@ export class TaskSteeringMiddleware {
    * Fire sync lifecycle hooks after a successful transition.
    * Build post-transition state so hooks see the updated taskStatuses.
    * Merges any returned state updates into the CommandResult.
+   * Also handles task start recording and summarization on completion.
    */
   private _fireLifecycleHooks(
     request: ToolCallRequest,
@@ -326,27 +347,35 @@ export class TaskSteeringMiddleware {
     target: string
   ): void {
     if (!this._isCommand(result) || !this._taskMap.has(taskName)) return
-    const taskMw = this._getTaskMiddleware(taskName)
-    if (!taskMw) return
-    const updatedStatuses = { ...statuses, [taskName]: target }
-    const postState = { ...request.state, taskStatuses: updatedStatuses }
 
-    let updates: Record<string, unknown> | void = undefined
-    if (target === TaskStatus.IN_PROGRESS) {
-      updates = taskMw.onStart(postState)
-    } else if (target === TaskStatus.COMPLETE) {
-      updates = taskMw.onComplete(postState)
+    const taskMw = this._getTaskMiddleware(taskName)
+    if (taskMw) {
+      const updatedStatuses = { ...statuses, [taskName]: target }
+      const postState = { ...request.state, taskStatuses: updatedStatuses }
+
+      let updates: Record<string, unknown> | void = undefined
+      if (target === TaskStatus.IN_PROGRESS) {
+        updates = taskMw.onStart(postState)
+      } else if (target === TaskStatus.COMPLETE) {
+        updates = taskMw.onComplete(postState)
+      }
+
+      if (updates) {
+        const merged = { ...result.update, ...updates }
+        if ('messages' in updates && 'messages' in result.update) {
+          merged.messages = [
+            ...(result.update.messages as unknown[]),
+            ...(updates.messages as unknown[]),
+          ]
+        }
+        result.update = merged
+      }
     }
 
-    if (updates) {
-      const merged = { ...result.update, ...updates }
-      if ('messages' in updates && 'messages' in result.update) {
-        merged.messages = [
-          ...(result.update.messages as unknown[]),
-          ...(updates.messages as unknown[]),
-        ]
-      }
-      result.update = merged
+    if (target === TaskStatus.IN_PROGRESS) {
+      this._recordTaskStart(result as CommandResult, request.state, taskName)
+    } else if (target === TaskStatus.COMPLETE) {
+      this._applySummarization(result as CommandResult, request.state, taskName)
     }
   }
 
@@ -500,6 +529,261 @@ export class TaskSteeringMiddleware {
         ],
       },
     }
+  }
+
+  // ── Summarization ──────────────────────────────────────
+
+  /**
+   * Inject `taskMessageStarts[taskName]` into the Command update.
+   * Mutates `result.update` in place.
+   */
+  private _recordTaskStart(
+    result: CommandResult,
+    state: Record<string, unknown>,
+    taskName: string
+  ): void {
+    const task = this._taskMap.get(taskName)
+    if (!task?.summarize) return
+
+    const messages = (state.messages as unknown[]) ?? []
+    const startIndex = messages.length + 1
+    const update = result.update
+    const starts: Record<string, number> = {
+      ...((state.taskMessageStarts as Record<string, number>) ?? {}),
+    }
+    starts[taskName] = startIndex
+    update.taskMessageStarts = starts
+  }
+
+  /**
+   * Shared setup for sync/async summarization.
+   *
+   * Returns `{ task, cfg, taskMessages, removeOps, model }` or `null` if
+   * summarization should be skipped.
+   */
+  private _prepareSummarization(
+    state: Record<string, unknown>,
+    taskName: string
+  ): {
+    task: Task
+    cfg: TaskSummarization
+    taskMessages: unknown[]
+    removeOps: unknown[]
+    model: unknown
+  } | null {
+    const task = this._taskMap.get(taskName)
+    if (!task?.summarize) return null
+
+    const messages = (state.messages as unknown[]) ?? []
+    const starts = (state.taskMessageStarts as Record<string, number>) ?? {}
+    const startIndex = starts[taskName]
+    if (startIndex == null) return null
+
+    // Exclude the complete-transition AIMessage (last element)
+    const taskMessages = messages.slice(startIndex, messages.length - 1)
+    if (taskMessages.length === 0) return null
+
+    const cfg = task.summarize
+    const model = cfg.model ?? this._model
+
+    if (cfg.mode === 'replace') {
+      const removeOps = taskMessages
+        .filter((m) => msgId(m) != null)
+        .map((m) => ({ id: msgId(m)!, _remove: true }))
+      return { task, cfg, taskMessages, removeOps, model }
+    } else {
+      if (model == null) {
+        console.warn(
+          `[langchain-task-steering] Skipping summarization for task '${taskName}': ` +
+            `no model configured. Set model on TaskSummarization or TaskSteeringMiddleware.`
+        )
+        return null
+      }
+      // Only remove AI/Tool messages (preserve Human messages)
+      const removeOps = taskMessages
+        .filter((m) => {
+          const role = msgRole(m)
+          return (role === 'ai' || role === 'tool') && msgId(m) != null
+        })
+        .map((m) => ({ id: msgId(m)!, _remove: true }))
+      return { task, cfg, taskMessages, removeOps, model }
+    }
+  }
+
+  /**
+   * Inject remove ops and rewrite the transition ToolMessage with the summary.
+   * Mutates `result.update` in place.
+   */
+  private _finalizeSummarization(
+    result: CommandResult,
+    state: Record<string, unknown>,
+    taskName: string,
+    cfg: TaskSummarization,
+    removeOps: unknown[],
+    summary: string
+  ): void {
+    const update = result.update
+    const existingMsgs = [...((update.messages as unknown[]) ?? [])]
+
+    // Rewrite the transition ToolMessage to include the summary
+    for (let i = 0; i < existingMsgs.length; i++) {
+      const msg = existingMsgs[i] as Record<string, unknown>
+      if (msg.role === 'tool') {
+        existingMsgs[i] = {
+          ...msg,
+          content: `${msg.content}\n\nTask summary:\n${summary}`,
+        }
+        break
+      }
+    }
+
+    // Strip text from the complete-transition AIMessage, keeping only tool_calls
+    const trimOps: unknown[] = []
+    const trimComplete = cfg.trimCompleteMessage !== false // default true
+    if (trimComplete) {
+      const messages = (state.messages as unknown[]) ?? []
+      if (messages.length > 0) {
+        const completeAi = messages[messages.length - 1] as Record<string, unknown>
+        if (completeAi.role === 'ai' && msgId(completeAi) != null) {
+          trimOps.push({
+            role: 'ai',
+            content: '',
+            id: msgId(completeAi),
+            tool_calls: (completeAi.tool_calls as unknown[]) ?? [],
+          })
+        }
+      }
+    }
+
+    update.messages = [...removeOps, ...trimOps, ...existingMsgs]
+
+    // Clean up start index
+    const starts: Record<string, number> = {
+      ...((state.taskMessageStarts as Record<string, number>) ?? {}),
+    }
+    delete starts[taskName]
+    update.taskMessageStarts = starts
+  }
+
+  /**
+   * Sync summarization: replace task messages with a summary.
+   * Mutates `result.update` in place.
+   */
+  private _applySummarization(
+    result: CommandResult,
+    state: Record<string, unknown>,
+    taskName: string
+  ): void {
+    const prep = this._prepareSummarization(state, taskName)
+    if (!prep) return
+
+    const { task, cfg, taskMessages, removeOps, model } = prep
+
+    let summary: string
+    if (cfg.mode === 'replace') {
+      summary = cfg.content!
+    } else {
+      const invokeMessages = TaskSteeringMiddleware._buildSummaryMessages(task, cfg, taskMessages)
+      const response = (model as { invoke(msgs: unknown[]): { content: string } }).invoke(
+        invokeMessages
+      )
+      summary = response.content
+    }
+
+    this._finalizeSummarization(result, state, taskName, cfg, removeOps, summary)
+  }
+
+  /**
+   * Async summarization: replace task messages with a summary.
+   * Mutates `result.update` in place.
+   */
+  private async _aapplySummarization(
+    result: CommandResult,
+    state: Record<string, unknown>,
+    taskName: string
+  ): Promise<void> {
+    const prep = this._prepareSummarization(state, taskName)
+    if (!prep) return
+
+    const { task, cfg, taskMessages, removeOps, model } = prep
+
+    let summary: string
+    if (cfg.mode === 'replace') {
+      summary = cfg.content!
+    } else {
+      const invokeMessages = TaskSteeringMiddleware._buildSummaryMessages(task, cfg, taskMessages)
+      const response = await (
+        model as { ainvoke(msgs: unknown[]): Promise<{ content: string }> }
+      ).ainvoke(invokeMessages)
+      summary = response.content
+    }
+
+    this._finalizeSummarization(result, state, taskName, cfg, removeOps, summary)
+  }
+
+  /**
+   * Convert task messages to plain text for the summarization LLM.
+   * Strips tool_calls / tool_call_id metadata so providers don't warn.
+   */
+  static _flattenForSummary(taskMessages: unknown[]): Array<{ role: string; content: string }> {
+    const flat: Array<{ role: string; content: string }> = []
+    for (const m of taskMessages) {
+      const msg = m as Record<string, unknown>
+      let content = msg.content as string | unknown[] | undefined
+      let text: string
+
+      if (Array.isArray(content)) {
+        text = (content as Array<Record<string, unknown>>)
+          .filter((b) => b.type === 'text')
+          .map((b) => (b.text as string) ?? '')
+          .join('\n')
+      } else {
+        text = String(content ?? '')
+      }
+
+      const role = msgRole(msg)
+      if (role === 'ai') {
+        // Include tool call names/args as text
+        const toolCalls = (msg.tool_calls as Array<Record<string, unknown>>) ?? []
+        for (const tc of toolCalls) {
+          const name = (tc.name as string) ?? '?'
+          const args = tc.args ?? {}
+          text += `\n[called ${name}(${JSON.stringify(args)})]`
+        }
+        if (text.trim()) {
+          flat.push({ role: 'ai', content: text.trim() })
+        }
+      } else if (role === 'tool') {
+        const name = (msg.name as string) ?? 'tool'
+        flat.push({ role: 'human', content: `[${name} result]: ${text}` })
+      } else if (text.trim()) {
+        flat.push({ role: 'human', content: text.trim() })
+      }
+    }
+    return flat
+  }
+
+  /**
+   * Build the full message list for the summarization LLM call.
+   */
+  static _buildSummaryMessages(
+    task: Task,
+    cfg: TaskSummarization,
+    taskMessages: unknown[]
+  ): Array<{ role: string; content: string }> {
+    const system = {
+      role: 'system',
+      content:
+        'You are summarizing a completed agent task.\n\n' +
+        `Task name: ${task.name}\n` +
+        `Task instruction: ${task.instruction}`,
+    }
+    const human = {
+      role: 'human',
+      content: cfg.prompt ?? 'Provide a concise summary of what was accomplished.',
+    }
+    const flat = TaskSteeringMiddleware._flattenForSummary(taskMessages)
+    return [system, ...flat, human]
   }
 
   // ── Internal helpers ──────────────────────────────────
@@ -793,6 +1077,12 @@ export class TaskSteeringMiddleware {
             result.update = merged
           }
         }
+
+        if (target === TaskStatus.IN_PROGRESS) {
+          this._recordTaskStart(result, request.state, taskName)
+        } else if (target === TaskStatus.COMPLETE) {
+          await this._aapplySummarization(result, request.state, taskName)
+        }
       }
 
       return result
@@ -808,6 +1098,16 @@ export class TaskSteeringMiddleware {
 
     return handler(request)
   }
+}
+
+// ── Message helpers ──────────────────────────────────────────
+
+function msgId(m: unknown): string | undefined {
+  return (m as Record<string, unknown>)?.id as string | undefined
+}
+
+function msgRole(m: unknown): string | undefined {
+  return (m as Record<string, unknown>)?.role as string | undefined
 }
 
 // ── Middleware composition ─────────────────────────────────

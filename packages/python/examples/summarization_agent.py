@@ -158,7 +158,8 @@ if __name__ == "__main__":
             # Extract text from block-style content
             if isinstance(content, list):
                 text_parts = [
-                    b["text"] for b in content
+                    b["text"]
+                    for b in content
                     if isinstance(b, dict) and b.get("type") == "text"
                 ]
                 preview = " ".join(text_parts)[:140]

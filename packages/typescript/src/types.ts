@@ -12,11 +12,58 @@ export enum TaskStatus {
 }
 
 /**
+ * Configuration for post-completion message summarization.
+ *
+ * Attached to a Task via `Task.summarize`. When the task transitions to
+ * `complete`, the middleware replaces task messages according to the chosen mode.
+ *
+ * Modes:
+ *
+ * `"replace"` — Removes **all** messages produced during the task and inserts
+ * a single summary whose content is `content`. Use this when you already know
+ * the summary (e.g. a static acknowledgment).
+ *
+ * `"summarize"` — Feeds the task messages to an LLM and replaces every
+ * AI/Tool message produced during the task with the LLM's summary.
+ * HumanMessages are preserved.
+ */
+export interface TaskSummarization {
+  mode: 'replace' | 'summarize'
+  /** Replacement text for `"replace"` mode (required when mode is `"replace"`). */
+  content?: string
+  /**
+   * Chat model for `"summarize"` mode. Any object with
+   * `invoke(messages)` and optionally `ainvoke(messages)` returning
+   * `{ content: string }`. Falls back to `TaskSteeringMiddleware(model=...)`.
+   */
+  model?: unknown
+  /** Custom prompt appended after the task messages when calling the summarization model. */
+  prompt?: string
+  /**
+   * If true (default), strip the text content from the complete-transition
+   * AIMessage, keeping only its tool_calls. The text is redundant once the
+   * summary is in the ToolMessage.
+   */
+  trimCompleteMessage?: boolean
+}
+
+/**
+ * Validate a TaskSummarization config.
+ * Throws if mode is `"replace"` and `content` is not provided.
+ */
+export function validateTaskSummarization(cfg: TaskSummarization): void {
+  if (cfg.mode === 'replace' && (cfg.content == null || cfg.content === undefined)) {
+    throw new Error("TaskSummarization(mode='replace') requires 'content'.")
+  }
+}
+
+/**
  * State shape for task-steering middleware.
  */
 export interface TaskSteeringState {
   messages: unknown[]
   taskStatuses?: Record<string, string>
+  taskMessageStarts?: Record<string, number>
   nudgeCount?: number
   skillsMetadata?: SkillMetadata[]
   [key: string]: unknown
@@ -208,4 +255,6 @@ export interface Task {
   middleware?: TaskMiddlewareInput | TaskMiddlewareInput[]
   /** Skill names available when this task is IN_PROGRESS. */
   skills?: string[]
+  /** Optional post-completion summarization config. */
+  summarize?: TaskSummarization
 }

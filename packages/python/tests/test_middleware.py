@@ -2288,7 +2288,10 @@ class TestLifecycleHookStateUpdates:
 
         handler = MagicMock(
             return_value=Command(
-                update={"task_statuses": {"a": "in_progress"}, "messages": [ToolMessage("ok", tool_call_id="call-1")]}
+                update={
+                    "task_statuses": {"a": "in_progress"},
+                    "messages": [ToolMessage("ok", tool_call_id="call-1")],
+                }
             )
         )
         result = mw.wrap_tool_call(request, handler)
@@ -2317,7 +2320,10 @@ class TestLifecycleHookStateUpdates:
 
         handler = MagicMock(
             return_value=Command(
-                update={"task_statuses": {"a": "complete"}, "messages": [ToolMessage("ok", tool_call_id="call-1")]}
+                update={
+                    "task_statuses": {"a": "complete"},
+                    "messages": [ToolMessage("ok", tool_call_id="call-1")],
+                }
             )
         )
         result = mw.wrap_tool_call(request, handler)
@@ -2346,9 +2352,7 @@ class TestLifecycleHookStateUpdates:
             state={"task_statuses": {"a": "in_progress"}},
         )
 
-        handler = MagicMock(
-            return_value=Command(update={"messages": [original_msg]})
-        )
+        handler = MagicMock(return_value=Command(update={"messages": [original_msg]}))
         result = mw.wrap_tool_call(request, handler)
         assert isinstance(result, Command)
         assert len(result.update["messages"]) == 2
@@ -2374,7 +2378,10 @@ class TestLifecycleHookStateUpdates:
             state={"task_statuses": {"a": "pending"}},
         )
 
-        original_update = {"task_statuses": {"a": "in_progress"}, "messages": [ToolMessage("ok", tool_call_id="call-1")]}
+        original_update = {
+            "task_statuses": {"a": "in_progress"},
+            "messages": [ToolMessage("ok", tool_call_id="call-1")],
+        }
         handler = MagicMock(return_value=Command(update=dict(original_update)))
         result = mw.wrap_tool_call(request, handler)
         assert isinstance(result, Command)
@@ -2406,9 +2413,7 @@ class TestLifecycleHookStateUpdates:
             state={"task_statuses": {"a": "pending"}},
         )
 
-        handler = MagicMock(
-            return_value=Command(update={"messages": [original_msg]})
-        )
+        handler = MagicMock(return_value=Command(update={"messages": [original_msg]}))
         result = mw.wrap_tool_call(request, handler)
         assert isinstance(result, Command)
         assert result.update["a"] == 1
@@ -2429,7 +2434,12 @@ class TestLifecycleHookStateUpdates:
                 return {"extra": True}
 
         tasks = [
-            Task(name="a", instruction="A", tools=[], middleware=[ReturnsNone(), ReturnsDict()])
+            Task(
+                name="a",
+                instruction="A",
+                tools=[],
+                middleware=[ReturnsNone(), ReturnsDict()],
+            )
         ]
         mw = TaskSteeringMiddleware(tasks=tasks)
 
@@ -2442,7 +2452,11 @@ class TestLifecycleHookStateUpdates:
             state={"task_statuses": {"a": "in_progress"}},
         )
 
-        handler = MagicMock(return_value=Command(update={"messages": [ToolMessage("ok", tool_call_id="call-1")]}))
+        handler = MagicMock(
+            return_value=Command(
+                update={"messages": [ToolMessage("ok", tool_call_id="call-1")]}
+            )
+        )
         result = mw.wrap_tool_call(request, handler)
         assert isinstance(result, Command)
         assert result.update["extra"] is True
@@ -2469,7 +2483,10 @@ class TestLifecycleHookStateUpdates:
 
         async def async_handler(r):
             return Command(
-                update={"task_statuses": {"a": "in_progress"}, "messages": [ToolMessage("ok", tool_call_id="call-1")]}
+                update={
+                    "task_statuses": {"a": "in_progress"},
+                    "messages": [ToolMessage("ok", tool_call_id="call-1")],
+                }
             )
 
         result = await mw.awrap_tool_call(request, async_handler)
@@ -2517,7 +2534,9 @@ class TestLifecycleHookStateUpdates:
             def on_start(self, state):
                 return {"from_sync": True}
 
-        tasks = [Task(name="a", instruction="A", tools=[], middleware=SyncReturnsDict())]
+        tasks = [
+            Task(name="a", instruction="A", tools=[], middleware=SyncReturnsDict())
+        ]
         mw = TaskSteeringMiddleware(tasks=tasks)
 
         request = MockToolCallRequest(
@@ -2530,7 +2549,9 @@ class TestLifecycleHookStateUpdates:
         )
 
         async def async_handler(r):
-            return Command(update={"messages": [ToolMessage("ok", tool_call_id="call-1")]})
+            return Command(
+                update={"messages": [ToolMessage("ok", tool_call_id="call-1")]}
+            )
 
         result = await mw.awrap_tool_call(request, async_handler)
         assert isinstance(result, Command)
@@ -2598,10 +2619,15 @@ class TestSummarizationReplace:
             content="Task 'a' -> in_progress.", tool_call_id="call-start"
         )
         result = mw.wrap_tool_call(
-            request, MagicMock(return_value=Command(update={
-                "task_statuses": {"a": "in_progress"},
-                "messages": [transition_msg],
-            }))
+            request,
+            MagicMock(
+                return_value=Command(
+                    update={
+                        "task_statuses": {"a": "in_progress"},
+                        "messages": [transition_msg],
+                    }
+                )
+            ),
         )
 
         assert isinstance(result, Command)
@@ -2632,10 +2658,15 @@ class TestSummarizationReplace:
             state=state,
         )
         result = mw.wrap_tool_call(
-            request, MagicMock(return_value=Command(update={
-                "task_statuses": {"a": "in_progress"},
-                "messages": [ToolMessage(content="ok", tool_call_id="call-1")],
-            }))
+            request,
+            MagicMock(
+                return_value=Command(
+                    update={
+                        "task_statuses": {"a": "in_progress"},
+                        "messages": [ToolMessage(content="ok", tool_call_id="call-1")],
+                    }
+                )
+            ),
         )
         assert isinstance(result, Command)
         assert "task_message_starts" not in result.update
@@ -2651,18 +2682,24 @@ class TestSummarizationReplace:
         complete_ai = AIMessage(
             content="",
             id="complete-ai",
-            tool_calls=[{
-                "name": "update_task_status",
-                "args": {"task": "a", "status": "complete"},
-                "id": "call-done",
-            }],
+            tool_calls=[
+                {
+                    "name": "update_task_status",
+                    "args": {"task": "a", "status": "complete"},
+                    "id": "call-done",
+                }
+            ],
         )
 
         messages = [
             AIMessage(content="pre-task", id="pre-1"),
             ToolMessage(content="pre-task", tool_call_id="x", id="pre-2"),
             AIMessage(content="start call", id="pre-3"),
-            ToolMessage(content="Task 'a' -> in_progress.", tool_call_id="call-start", id="pre-4"),
+            ToolMessage(
+                content="Task 'a' -> in_progress.",
+                tool_call_id="call-start",
+                id="pre-4",
+            ),
             *task_work,
             complete_ai,
         ]
@@ -2686,10 +2723,15 @@ class TestSummarizationReplace:
             content="Task 'a' -> complete.", tool_call_id="call-done"
         )
         result = mw.wrap_tool_call(
-            request, MagicMock(return_value=Command(update={
-                "task_statuses": {"a": "complete"},
-                "messages": [transition_msg],
-            }))
+            request,
+            MagicMock(
+                return_value=Command(
+                    update={
+                        "task_statuses": {"a": "complete"},
+                        "messages": [transition_msg],
+                    }
+                )
+            ),
         )
 
         assert isinstance(result, Command)
@@ -2716,19 +2758,26 @@ class TestSummarizationReplace:
         mw = self._build_middleware()
 
         complete_ai = AIMessage(
-            content="", id="complete-ai",
-            tool_calls=[{
-                "name": "update_task_status",
-                "args": {"task": "a", "status": "complete"},
-                "id": "call-done",
-            }],
+            content="",
+            id="complete-ai",
+            tool_calls=[
+                {
+                    "name": "update_task_status",
+                    "args": {"task": "a", "status": "complete"},
+                    "id": "call-done",
+                }
+            ],
         )
 
         state = {
             "task_statuses": {"a": "in_progress"},
             # No task_message_starts entry
             "messages": [
-                ToolMessage(content="Task 'a' -> in_progress.", tool_call_id="call-start", id="pre-1"),
+                ToolMessage(
+                    content="Task 'a' -> in_progress.",
+                    tool_call_id="call-start",
+                    id="pre-1",
+                ),
                 complete_ai,
             ],
         }
@@ -2745,10 +2794,12 @@ class TestSummarizationReplace:
         transition_msg = ToolMessage(
             content="Task 'a' -> complete.", tool_call_id="call-done"
         )
-        original_cmd = Command(update={
-            "task_statuses": {"a": "complete"},
-            "messages": [transition_msg],
-        })
+        original_cmd = Command(
+            update={
+                "task_statuses": {"a": "complete"},
+                "messages": [transition_msg],
+            }
+        )
         result = mw.wrap_tool_call(request, MagicMock(return_value=original_cmd))
 
         assert isinstance(result, Command)
@@ -2769,7 +2820,8 @@ class TestSummarizationSummarize:
                     instruction="Gather requirements.",
                     tools=[tool_a],
                     summarize=TaskSummarization(
-                        mode="summarize", model=mock_model,
+                        mode="summarize",
+                        model=mock_model,
                     ),
                 ),
             ]
@@ -2792,16 +2844,23 @@ class TestSummarizationSummarize:
             AIMessage(content="Got it.", id="work-3"),
         ]
         complete_ai = AIMessage(
-            content="", id="complete-ai",
-            tool_calls=[{
-                "name": "update_task_status",
-                "args": {"task": "a", "status": "complete"},
-                "id": "call-done",
-            }],
+            content="",
+            id="complete-ai",
+            tool_calls=[
+                {
+                    "name": "update_task_status",
+                    "args": {"task": "a", "status": "complete"},
+                    "id": "call-done",
+                }
+            ],
         )
 
         messages = [
-            ToolMessage(content="Task 'a' -> in_progress.", tool_call_id="call-start", id="pre-1"),
+            ToolMessage(
+                content="Task 'a' -> in_progress.",
+                tool_call_id="call-start",
+                id="pre-1",
+            ),
             *task_work,
             complete_ai,
         ]
@@ -2825,22 +2884,28 @@ class TestSummarizationSummarize:
             content="Task 'a' -> complete.", tool_call_id="call-done"
         )
         result = mw.wrap_tool_call(
-            request, MagicMock(return_value=Command(update={
-                "task_statuses": {"a": "complete"},
-                "messages": [transition_msg],
-            }))
+            request,
+            MagicMock(
+                return_value=Command(
+                    update={
+                        "task_statuses": {"a": "complete"},
+                        "messages": [transition_msg],
+                    }
+                )
+            ),
         )
 
         assert isinstance(result, Command)
 
-        # Model called with: SystemMessage + task work + HumanMessage
+        # Model called with: SystemMessage + flattened task work + HumanMessage
         mock_model.invoke.assert_called_once()
         call_messages = mock_model.invoke.call_args[0][0]
         assert "Gather requirements." in call_messages[0].content
         assert "Task name: a" in call_messages[0].content
-        assert call_messages[1:-1] == list(task_work)
+        # Task work is flattened (tool metadata stripped)
+        middle = call_messages[1:-1]
+        assert any("gather items" in m.content.lower() for m in middle)
         assert isinstance(call_messages[-1], HumanMessage)
-        assert len(call_messages) == 1 + len(task_work) + 1
 
         result_msgs = result.update["messages"]
 
@@ -2872,18 +2937,26 @@ class TestSummarizationSummarize:
                     instruction="Gather requirements.",
                     tools=[tool_a],
                     summarize=TaskSummarization(
-                        mode="summarize", model=mock_model, prompt=custom,
+                        mode="summarize",
+                        model=mock_model,
+                        prompt=custom,
                     ),
                 ),
             ]
         )
 
         task_work = [AIMessage(content="working", id="w-1")]
-        complete_ai = AIMessage(content="", id="c-ai", tool_calls=[{
-            "name": "update_task_status",
-            "args": {"task": "a", "status": "complete"},
-            "id": "call-done",
-        }])
+        complete_ai = AIMessage(
+            content="",
+            id="c-ai",
+            tool_calls=[
+                {
+                    "name": "update_task_status",
+                    "args": {"task": "a", "status": "complete"},
+                    "id": "call-done",
+                }
+            ],
+        )
 
         state = {
             "task_statuses": {"a": "in_progress"},
@@ -2901,10 +2974,17 @@ class TestSummarizationSummarize:
         )
 
         mw.wrap_tool_call(
-            request, MagicMock(return_value=Command(update={
-                "task_statuses": {"a": "complete"},
-                "messages": [ToolMessage(content="ok", tool_call_id="call-done")],
-            }))
+            request,
+            MagicMock(
+                return_value=Command(
+                    update={
+                        "task_statuses": {"a": "complete"},
+                        "messages": [
+                            ToolMessage(content="ok", tool_call_id="call-done")
+                        ],
+                    }
+                )
+            ),
         )
 
         call_messages = mock_model.invoke.call_args[0][0]
@@ -2930,11 +3010,17 @@ class TestSummarizationSummarize:
         )
 
         task_work = [AIMessage(content="working", id="w-1")]
-        complete_ai = AIMessage(content="", id="c-ai", tool_calls=[{
-            "name": "update_task_status",
-            "args": {"task": "a", "status": "complete"},
-            "id": "call-done",
-        }])
+        complete_ai = AIMessage(
+            content="",
+            id="c-ai",
+            tool_calls=[
+                {
+                    "name": "update_task_status",
+                    "args": {"task": "a", "status": "complete"},
+                    "id": "call-done",
+                }
+            ],
+        )
 
         state = {
             "task_statuses": {"a": "in_progress"},
@@ -2952,10 +3038,17 @@ class TestSummarizationSummarize:
         )
 
         result = mw.wrap_tool_call(
-            request, MagicMock(return_value=Command(update={
-                "task_statuses": {"a": "complete"},
-                "messages": [ToolMessage(content="ok", tool_call_id="call-done")],
-            }))
+            request,
+            MagicMock(
+                return_value=Command(
+                    update={
+                        "task_statuses": {"a": "complete"},
+                        "messages": [
+                            ToolMessage(content="ok", tool_call_id="call-done")
+                        ],
+                    }
+                )
+            ),
         )
 
         mock_model.invoke.assert_called_once()
@@ -2975,11 +3068,17 @@ class TestSummarizationSummarize:
         )
 
         task_work = [AIMessage(content="working", id="w-1")]
-        complete_ai = AIMessage(content="", id="c-ai", tool_calls=[{
-            "name": "update_task_status",
-            "args": {"task": "a", "status": "complete"},
-            "id": "call-done",
-        }])
+        complete_ai = AIMessage(
+            content="",
+            id="c-ai",
+            tool_calls=[
+                {
+                    "name": "update_task_status",
+                    "args": {"task": "a", "status": "complete"},
+                    "id": "call-done",
+                }
+            ],
+        )
 
         state = {
             "task_statuses": {"a": "in_progress"},
@@ -2998,10 +3097,15 @@ class TestSummarizationSummarize:
 
         transition_msg = ToolMessage(content="ok", tool_call_id="call-done")
         result = mw.wrap_tool_call(
-            request, MagicMock(return_value=Command(update={
-                "task_statuses": {"a": "complete"},
-                "messages": [transition_msg],
-            }))
+            request,
+            MagicMock(
+                return_value=Command(
+                    update={
+                        "task_statuses": {"a": "complete"},
+                        "messages": [transition_msg],
+                    }
+                )
+            ),
         )
 
         assert isinstance(result, Command)
@@ -3018,11 +3122,17 @@ class TestSummarizationSummarize:
             "task_statuses": {"a": "in_progress"},
             "messages": [
                 AIMessage(content="work", id="w-1"),
-                AIMessage(content="", id="c-ai", tool_calls=[{
-                    "name": "update_task_status",
-                    "args": {"task": "a", "status": "complete"},
-                    "id": "call-done",
-                }]),
+                AIMessage(
+                    content="",
+                    id="c-ai",
+                    tool_calls=[
+                        {
+                            "name": "update_task_status",
+                            "args": {"task": "a", "status": "complete"},
+                            "id": "call-done",
+                        }
+                    ],
+                ),
             ],
         }
 
@@ -3038,10 +3148,12 @@ class TestSummarizationSummarize:
         transition_msg = ToolMessage(
             content="Task 'a' -> complete.", tool_call_id="call-done"
         )
-        original_cmd = Command(update={
-            "task_statuses": {"a": "complete"},
-            "messages": [transition_msg],
-        })
+        original_cmd = Command(
+            update={
+                "task_statuses": {"a": "complete"},
+                "messages": [transition_msg],
+            }
+        )
         result = mw.wrap_tool_call(request, MagicMock(return_value=original_cmd))
 
         assert isinstance(result, Command)
@@ -3058,9 +3170,7 @@ class TestSummarizationAsync:
     @pytest.mark.asyncio
     async def test_async_summarize_uses_ainvoke(self):
         mock_model = MagicMock()
-        mock_model.ainvoke = MagicMock(
-            return_value=AIMessage(content="Async summary.")
-        )
+        mock_model.ainvoke = MagicMock(return_value=AIMessage(content="Async summary."))
 
         # Make ainvoke a proper coroutine
         import asyncio
@@ -3082,11 +3192,17 @@ class TestSummarizationAsync:
         )
 
         task_work = [AIMessage(content="working", id="w-1")]
-        complete_ai = AIMessage(content="", id="c-ai", tool_calls=[{
-            "name": "update_task_status",
-            "args": {"task": "a", "status": "complete"},
-            "id": "call-done",
-        }])
+        complete_ai = AIMessage(
+            content="",
+            id="c-ai",
+            tool_calls=[
+                {
+                    "name": "update_task_status",
+                    "args": {"task": "a", "status": "complete"},
+                    "id": "call-done",
+                }
+            ],
+        )
 
         state = {
             "task_statuses": {"a": "in_progress"},
@@ -3106,10 +3222,12 @@ class TestSummarizationAsync:
         transition_msg = ToolMessage(content="ok", tool_call_id="call-done")
 
         async def async_handler(r):
-            return Command(update={
-                "task_statuses": {"a": "complete"},
-                "messages": [transition_msg],
-            })
+            return Command(
+                update={
+                    "task_statuses": {"a": "complete"},
+                    "messages": [transition_msg],
+                }
+            )
 
         result = await mw.awrap_tool_call(request, async_handler)
 
@@ -3132,11 +3250,17 @@ class TestSummarizationAsync:
         )
 
         task_work = [AIMessage(content="working", id="w-1")]
-        complete_ai = AIMessage(content="", id="c-ai", tool_calls=[{
-            "name": "update_task_status",
-            "args": {"task": "a", "status": "complete"},
-            "id": "call-done",
-        }])
+        complete_ai = AIMessage(
+            content="",
+            id="c-ai",
+            tool_calls=[
+                {
+                    "name": "update_task_status",
+                    "args": {"task": "a", "status": "complete"},
+                    "id": "call-done",
+                }
+            ],
+        )
 
         state = {
             "task_statuses": {"a": "in_progress"},
@@ -3154,10 +3278,12 @@ class TestSummarizationAsync:
         )
 
         async def async_handler(r):
-            return Command(update={
-                "task_statuses": {"a": "complete"},
-                "messages": [ToolMessage(content="ok", tool_call_id="call-done")],
-            })
+            return Command(
+                update={
+                    "task_statuses": {"a": "complete"},
+                    "messages": [ToolMessage(content="ok", tool_call_id="call-done")],
+                }
+            )
 
         result = await mw.awrap_tool_call(request, async_handler)
 
@@ -3165,5 +3291,7 @@ class TestSummarizationAsync:
         tool_msgs = [m for m in result.update["messages"] if isinstance(m, ToolMessage)]
         assert len(tool_msgs) == 1
         assert "Done." in tool_msgs[0].content
-        remove_ops = [m for m in result.update["messages"] if isinstance(m, RemoveMessage)]
+        remove_ops = [
+            m for m in result.update["messages"] if isinstance(m, RemoveMessage)
+        ]
         assert len(remove_ops) == 1  # only task work
