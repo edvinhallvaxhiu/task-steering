@@ -52,11 +52,11 @@ const pipeline = new TaskSteeringMiddleware({
 The middleware exposes hooks you integrate into your agent loop:
 
 ```typescript
-pipeline.tools           // all tools to register with the agent
-pipeline.beforeAgent()   // call on first invocation to init state
+pipeline.tools // all tools to register with the agent
+pipeline.beforeAgent() // call on first invocation to init state
 pipeline.wrapModelCall() // wrap model calls for prompt injection + tool scoping
-pipeline.wrapToolCall()  // wrap tool calls for validation + delegation
-pipeline.afterAgent()    // call after agent to check required tasks
+pipeline.wrapToolCall() // wrap tool calls for validation + delegation
+pipeline.afterAgent() // call after agent to check required tasks
 ```
 
 See [`examples/simple-agent.ts`](https://github.com/edvinhallvaxhiu/langchain-task-steering/blob/main/packages/typescript/examples/simple-agent.ts) for a full end-to-end example with Bedrock.
@@ -90,21 +90,23 @@ const result = pipeline.wrapToolCall(toolCallReq, (r) =>
 
 // 4. When agent stops — check required tasks
 const nudge = pipeline.afterAgent(state)
-if (nudge) { /* add nudge message, continue loop */ }
+if (nudge) {
+  /* add nudge message, continue loop */
+}
 ```
 
 ## Documentation
 
 Detailed documentation is shared across both Python and TypeScript packages. The concepts and behavior are identical — only the API surface differs by language.
 
-| Topic | Description |
-|---|---|
-| [Task Mode](../../docs/task-mode.md) | Task lifecycle, hooks, tool scoping, required tasks, configuration |
-| [Workflow Mode](../../docs/workflow-mode.md) | Dynamic workflow activation, catalog, human-in-the-loop, deactivation |
-| [Task Middleware](../../docs/task-middleware.md) | TaskMiddleware hooks, validation, composition, persistent state |
-| [Summarization](../../docs/summarization.md) | Post-completion message compression (replace and summarize modes) |
-| [Skills](../../docs/skills.md) | Task-scoped skills from SKILL.md files |
-| [Backend Passthrough](../../docs/backend-passthrough.md) | Whitelisting backend tools through the filter |
+| Topic                                                    | Description                                                           |
+| -------------------------------------------------------- | --------------------------------------------------------------------- |
+| [Task Mode](../../docs/task-mode.md)                     | Task lifecycle, hooks, tool scoping, required tasks, configuration    |
+| [Workflow Mode](../../docs/workflow-mode.md)             | Dynamic workflow activation, catalog, human-in-the-loop, deactivation |
+| [Task Middleware](../../docs/task-middleware.md)         | TaskMiddleware hooks, validation, composition, persistent state       |
+| [Summarization](../../docs/summarization.md)             | Post-completion message compression (replace and summarize modes)     |
+| [Skills](../../docs/skills.md)                           | Task-scoped skills from SKILL.md files                                |
+| [Backend Passthrough](../../docs/backend-passthrough.md) | Whitelisting backend tools through the filter                         |
 
 > **Note:** Code examples in the docs are primarily in Python. The TypeScript API mirrors the same design with camelCase naming (`enforceOrder`, `globalTools`, `validateCompletion`, etc.).
 
@@ -126,14 +128,14 @@ const pipeline = new TaskSteeringMiddleware({
 
 ### Task fields
 
-| Field | Required | Description |
-|---|---|---|
-| `name` | yes | Unique identifier (used in prompts and state). |
-| `instruction` | yes | Injected into system prompt when this task is active. |
-| `tools` | yes | Tools visible when this task is `IN_PROGRESS`. |
-| `middleware` | no | Scoped middleware — a `TaskMiddleware`, agent middleware object (auto-wrapped), or a list. |
-| `skills` | no | Skill names available when this task is `IN_PROGRESS`. |
-| `summarize` | no | Post-completion summarization config. See [Summarization](../../docs/summarization.md). |
+| Field         | Required | Description                                                                                |
+| ------------- | -------- | ------------------------------------------------------------------------------------------ |
+| `name`        | yes      | Unique identifier (used in prompts and state).                                             |
+| `instruction` | yes      | Injected into system prompt when this task is active.                                      |
+| `tools`       | yes      | Tools visible when this task is `IN_PROGRESS`.                                             |
+| `middleware`  | no       | Scoped middleware — a `TaskMiddleware`, agent middleware object (auto-wrapped), or a list. |
+| `skills`      | no       | Skill names available when this task is `IN_PROGRESS`.                                     |
+| `summarize`   | no       | Post-completion summarization config. See [Summarization](../../docs/summarization.md).    |
 
 ## Development
 

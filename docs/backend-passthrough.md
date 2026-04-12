@@ -45,5 +45,3 @@ TaskSteeringMiddleware(
 ```python
 pipeline.get_backend_tools()  # returns the effective whitelist (frozenset)
 ```
-
-No `backend` is required for passthrough — it just whitelists tool names in the filter.

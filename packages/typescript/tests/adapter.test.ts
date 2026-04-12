@@ -2,6 +2,7 @@ import { describe, it, expect, vi } from 'vitest'
 import {
   AgentMiddlewareAdapter,
   TaskSteeringMiddleware,
+  _getAllowedToolNames,
   type AgentMiddlewareLike,
   type Task,
   type ModelRequest,
@@ -152,7 +153,13 @@ describe('AgentMiddlewareAdapter — integration', () => {
     const tasks: Task[] = [{ name: 'a', instruction: 'A', tools: [toolA], middleware: adapter }]
     const mw = new TaskSteeringMiddleware({ tasks })
 
-    const names = mw._allowedToolNames('a')
+    const names = _getAllowedToolNames(
+      mw._ctx,
+      'a',
+      new Set(),
+      false,
+      TaskSteeringMiddleware.DEFAULT_BACKEND_TOOLS
+    )
     expect(names.has('inner_tool')).toBe(true)
     expect(names.has('tool_a')).toBe(true)
   })

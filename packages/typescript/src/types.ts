@@ -66,6 +66,7 @@ export interface TaskSteeringState {
   taskMessageStarts?: Record<string, number>
   nudgeCount?: number
   skillsMetadata?: SkillMetadata[]
+  activeWorkflow?: string | null
   [key: string]: unknown
 }
 
@@ -257,4 +258,35 @@ export interface Task {
   skills?: string[]
   /** Optional post-completion summarization config. */
   summarize?: TaskSummarization
+}
+
+/**
+ * A named, self-describing wrapper around a task list.
+ *
+ * The agent sees a catalog of available workflows and activates one on
+ * demand via the `activate_workflow` tool.
+ */
+export interface Workflow {
+  /** Unique workflow identifier. */
+  name: string
+  /** Shown in the catalog view so the agent can decide which workflow to activate. */
+  description: string
+  /** Ordered list of Task definitions for this workflow. */
+  tasks: Task[]
+  /** Tools available across all tasks when this workflow is active. */
+  globalTools?: ToolLike[]
+  /** Skill names available across all tasks when this workflow is active. */
+  globalSkills?: string[]
+  /** If true (default), tasks must be completed in the order they are defined. */
+  enforceOrder?: boolean
+  /**
+   * Task names that must be completed before the workflow can be considered done.
+   * Defaults to all tasks (`['*']`). Pass `null` for no required tasks.
+   */
+  requiredTasks?: readonly string[] | null
+  /**
+   * If true, the agent can deactivate this workflow even while a task is in progress.
+   * Default false blocks deactivation until the active task is completed.
+   */
+  allowDeactivateInProgress?: boolean
 }

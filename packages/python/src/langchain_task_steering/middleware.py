@@ -435,9 +435,7 @@ class _TaskSteeringBase(AgentMiddleware[TaskSteeringState]):
         """Async version of _on_no_pipeline_tool_call."""
         return await handler(request)
 
-    def _build_nudge_message(
-        self, incomplete: list[str], state: dict
-    ) -> HumanMessage:
+    def _build_nudge_message(self, incomplete: list[str], state: dict) -> HumanMessage:
         """Build the nudge HumanMessage for after_agent."""
         task_list = ", ".join(incomplete)
         return HumanMessage(
@@ -809,7 +807,10 @@ class _TaskSteeringBase(AgentMiddleware[TaskSteeringState]):
             result = self._record_task_start(result, request.state, task_name, ctx)
         elif target == TaskStatus.COMPLETE.value:
             result = await self._aapply_summarization(
-                result, request.state, task_name, ctx,
+                result,
+                request.state,
+                task_name,
+                ctx,
             )
 
         return result
@@ -840,7 +841,9 @@ class _TaskSteeringBase(AgentMiddleware[TaskSteeringState]):
         statuses = self._get_statuses(ctx, request.state)
         active_name = self._active_task(ctx, statuses)
 
-        block = self._render_status_block(ctx, statuses, active_name, state=request.state)
+        block = self._render_status_block(
+            ctx, statuses, active_name, state=request.state
+        )
         existing = (
             list(request.system_message.content_blocks)
             if request.system_message is not None
@@ -1079,6 +1082,82 @@ class _TaskSteeringBase(AgentMiddleware[TaskSteeringState]):
         )
         flat = _TaskSteeringBase._flatten_for_summary(task_messages)
         return [system, *flat, human]
+
+    # ── Shared transition logic ──────────────────────────────
+
+    @staticmethod
+    def _execute_task_transition(
+        task: str,
+        status: str,
+        task_order: list[str],
+        enforce_order: bool,
+        state: dict,
+        tool_call_id: str,
+        context_label: str = "",
+    ) -> Command | str:
+        """Validate and execute a task status transition.
+
+        Shared by task-mode and workflow-mode transition tools.
+        Returns a ``Command`` on success or an error string on failure.
+        """
+        if task not in task_order:
+            suffix = f" for {context_label}" if context_label else ""
+            return (
+                f"Invalid task '{task}'{suffix}. "
+                f"Must be one of: {', '.join(task_order)}"
+            )
+
+        if status not in (
+            TaskStatus.IN_PROGRESS.value,
+            TaskStatus.COMPLETE.value,
+        ):
+            return f"Invalid status '{status}'. Must be 'in_progress' or 'complete'."
+
+        statuses = dict(state.get("task_statuses") or {})
+        for t in task_order:
+            statuses.setdefault(t, TaskStatus.PENDING.value)
+
+        current = statuses[task]
+
+        if current == TaskStatus.COMPLETE.value:
+            return f"Task '{task}' is already complete."
+
+        valid_next = {
+            TaskStatus.PENDING.value: TaskStatus.IN_PROGRESS.value,
+            TaskStatus.IN_PROGRESS.value: TaskStatus.COMPLETE.value,
+        }
+        expected = valid_next.get(current)
+        if expected != status:
+            return (
+                f"Cannot transition '{task}' from '{current}' to "
+                f"'{status}'. Expected next: '{expected}'."
+            )
+
+        if enforce_order and status == TaskStatus.IN_PROGRESS.value:
+            idx = task_order.index(task)
+            for prev in task_order[:idx]:
+                if statuses[prev] != TaskStatus.COMPLETE.value:
+                    return (
+                        f"Cannot start '{task}': '{prev}' is not "
+                        f"complete yet. "
+                        f"Order: {' -> '.join(task_order)}."
+                    )
+
+        statuses[task] = status
+
+        display = "\n".join(f"  {k}: {v}" for k, v in statuses.items())
+        return Command(
+            update={
+                "task_statuses": statuses,
+                "nudge_count": 0,
+                "messages": [
+                    ToolMessage(
+                        f"Task '{task}' -> {status}.\n\n{display}",
+                        tool_call_id=tool_call_id,
+                    )
+                ],
+            }
+        )
 
     # ── Shared wrap-style hooks ──────────────────────────────
 
@@ -1321,152 +1400,24 @@ class TaskSteeringMiddleware(_TaskSteeringBase):
         self._transition_tool = self._build_transition_tool()
         self.state_schema = self._merge_state_schemas(tasks)
 
-        self.tools = _dedup_tools([
-            self._transition_tool,
-            *self._ctx.global_tools,
-            *(tool_obj for task in tasks for tool_obj in task.tools),
-            *(
-                tool_obj
-                for task in tasks
-                if task.middleware and hasattr(task.middleware, "tools")
-                for tool_obj in (task.middleware.tools or [])
-            ),
-        ])
+        self.tools = _dedup_tools(
+            [
+                self._transition_tool,
+                *self._ctx.global_tools,
+                *(tool_obj for task in tasks for tool_obj in task.tools),
+                *(
+                    tool_obj
+                    for task in tasks
+                    if task.middleware and hasattr(task.middleware, "tools")
+                    for tool_obj in (task.middleware.tools or [])
+                ),
+            ]
+        )
 
     # ── Pipeline context ────────────────────────────────────
 
     def _get_pipeline_ctx(self, state: dict) -> _PipelineContext | None:
         return self._ctx
-
-    # ── Backward-compat properties ──────────────────────────
-    # Tests access these attributes directly.
-
-    @property
-    def _task_order(self) -> list[str]:
-        return self._ctx.task_order
-
-    @property
-    def _task_map(self) -> dict[str, Task]:
-        return self._ctx.task_map
-
-    @property
-    def _tasks(self) -> list:
-        return self._ctx.tasks
-
-    @property
-    def _enforce_order(self) -> bool:
-        return self._ctx.enforce_order
-
-    @property
-    def _required_tasks(self) -> set[str]:
-        return self._ctx.required_tasks
-
-    @property
-    def _global_tools(self) -> list:
-        return self._ctx.global_tools
-
-    @property
-    def _global_skills(self) -> list[str]:
-        return self._ctx.global_skills
-
-    @property
-    def _skills_active(self) -> bool:
-        return self._ctx.skills_active
-
-    @property
-    def _skill_required_tools(self) -> frozenset[str]:
-        return self._ctx.skill_required_tools
-
-    # ── Backward-compat wrappers for old call signatures ──
-    # Tests call these with the old (non-ctx) signatures.
-    # These delegate to the base-class static/instance methods
-    # with self._ctx supplied automatically.
-
-    # NOTE: These shadow the base-class methods of the same name.
-    # The base class hooks (wrap_model_call, wrap_tool_call, etc.)
-    # call the ctx-taking versions directly so these are only hit
-    # by external callers using the old API.
-
-    def _get_statuses(self, state_or_ctx, state=None):  # type: ignore[override]
-        """Backward-compat: accept (state) or (ctx, state)."""
-        if isinstance(state_or_ctx, _PipelineContext):
-            return _TaskSteeringBase._get_statuses(state_or_ctx, state)
-        return _TaskSteeringBase._get_statuses(self._ctx, state_or_ctx)
-
-    def _active_task(self, statuses_or_ctx, statuses=None):  # type: ignore[override]
-        """Backward-compat: accept (statuses) or (ctx, statuses)."""
-        if isinstance(statuses_or_ctx, _PipelineContext):
-            return _TaskSteeringBase._active_task(statuses_or_ctx, statuses)
-        return _TaskSteeringBase._active_task(self._ctx, statuses_or_ctx)
-
-    def _get_task_middleware(self, ctx_or_name, task_name=None):  # type: ignore[override]
-        """Backward-compat: accept (task_name) or (ctx, task_name)."""
-        if isinstance(ctx_or_name, _PipelineContext):
-            return _TaskSteeringBase._get_task_middleware(ctx_or_name, task_name)
-        return _TaskSteeringBase._get_task_middleware(self._ctx, ctx_or_name)
-
-    def _allowed_tool_names(self, active_name_or_ctx=None, active_name=None, state=None):  # type: ignore[override]
-        """Backward-compat: accept (active_name, state=) or (ctx, active_name, state=)."""
-        if isinstance(active_name_or_ctx, _PipelineContext):
-            return _TaskSteeringBase._allowed_tool_names(self, active_name_or_ctx, active_name, state=state)
-        # Old API: _allowed_tool_names("task_name") or _allowed_tool_names(active_name="task_name")
-        resolved_name = active_name_or_ctx if active_name_or_ctx is not None else active_name
-        return _TaskSteeringBase._allowed_tool_names(self, self._ctx, resolved_name, state=state)
-
-    def _render_status_block(self, statuses_or_ctx, statuses=None, active=None, state=None):  # type: ignore[override]
-        """Backward-compat: accept (statuses, active=, state=) or (ctx, statuses, active, state=)."""
-        if isinstance(statuses_or_ctx, _PipelineContext):
-            return _TaskSteeringBase._render_status_block(self, statuses_or_ctx, statuses, active, state=state)
-        # Old API: _render_status_block(statuses, active=..., state=...)
-        # `statuses_or_ctx` is the statuses dict, `active` comes from keyword
-        return _TaskSteeringBase._render_status_block(self, self._ctx, statuses_or_ctx, active, state=state)
-
-    def _validate_transition(self, request, statuses, ctx=None):  # type: ignore[override]
-        """Backward-compat: accept (request, statuses) or (request, statuses, ctx)."""
-        return _TaskSteeringBase._validate_transition(self, request, statuses, ctx or self._ctx)
-
-    async def _avalidate_transition(self, request, statuses, ctx=None):  # type: ignore[override]
-        """Backward-compat: accept (request, statuses) or (request, statuses, ctx)."""
-        return await _TaskSteeringBase._avalidate_transition(self, request, statuses, ctx or self._ctx)
-
-    def _fire_lifecycle_hooks(self, request, result, statuses, ctx=None):  # type: ignore[override]
-        """Backward-compat: accept (request, result, statuses) or (request, result, statuses, ctx)."""
-        return _TaskSteeringBase._fire_lifecycle_hooks(self, request, result, statuses, ctx or self._ctx)
-
-    async def _afire_lifecycle_hooks(self, request, result, statuses, ctx=None):  # type: ignore[override]
-        """Backward-compat: accept (request, result, statuses) or (request, result, statuses, ctx)."""
-        return await _TaskSteeringBase._afire_lifecycle_hooks(self, request, result, statuses, ctx or self._ctx)
-
-    def _gate_tool(self, request, active_name, ctx=None, state=None):  # type: ignore[override]
-        """Backward-compat: accept (request, active_name) or (request, active_name, ctx, state)."""
-        return _TaskSteeringBase._gate_tool(self, request, active_name, ctx or self._ctx, state or request.state)
-
-    def _prepare_model_request(self, request, ctx=None):  # type: ignore[override]
-        """Backward-compat: accept (request) or (request, ctx)."""
-        return _TaskSteeringBase._prepare_model_request(self, request, ctx or self._ctx)
-
-    def _record_task_start(self, result, state, task_name, ctx=None):  # type: ignore[override]
-        """Backward-compat: accept (result, state, task_name) or (result, state, task_name, ctx)."""
-        return _TaskSteeringBase._record_task_start(result, state, task_name, ctx or self._ctx)
-
-    def _prepare_summarization(self, state, task_name, ctx=None):  # type: ignore[override]
-        """Backward-compat: accept (state, task_name) or (state, task_name, ctx)."""
-        return _TaskSteeringBase._prepare_summarization(self, state, task_name, ctx or self._ctx)
-
-    def _apply_summarization(self, result, state, task_name, ctx=None):  # type: ignore[override]
-        """Backward-compat: accept (result, state, task_name) or (result, state, task_name, ctx)."""
-        return _TaskSteeringBase._apply_summarization(self, result, state, task_name, ctx or self._ctx)
-
-    async def _aapply_summarization(self, result, state, task_name, ctx=None):  # type: ignore[override]
-        """Backward-compat: accept (result, state, task_name) or (result, state, task_name, ctx)."""
-        return await _TaskSteeringBase._aapply_summarization(self, result, state, task_name, ctx or self._ctx)
-
-    def _allowed_skill_names(self, active_name_or_ctx=None, active_name=None):  # type: ignore[override]
-        """Backward-compat: accept (active_name) or (ctx, active_name)."""
-        if isinstance(active_name_or_ctx, _PipelineContext):
-            return _TaskSteeringBase._allowed_skill_names(active_name_or_ctx, active_name)
-        resolved_name = active_name_or_ctx if active_name_or_ctx is not None else active_name
-        return _TaskSteeringBase._allowed_skill_names(self._ctx, resolved_name)
 
     # ── Node-style hooks ────────────────────────────────────
 
@@ -1490,6 +1441,7 @@ class TaskSteeringMiddleware(_TaskSteeringBase):
         task_order = self._ctx.task_order
         enforce_order = self._ctx.enforce_order
         task_names_hint = ", ".join(f"'{n}'" for n in task_order)
+        execute = _TaskSteeringBase._execute_task_transition
 
         @tool(
             name_or_callable=_TRANSITION_TOOL_NAME,
@@ -1505,63 +1457,13 @@ class TaskSteeringMiddleware(_TaskSteeringBase):
             runtime: ToolRuntime,
         ) -> Command | str:
             """Set task status with enforced transition and ordering rules."""
-            if task not in task_order:
-                return f"Invalid task '{task}'. Must be one of: {', '.join(task_order)}"
-
-            if status not in (
-                TaskStatus.IN_PROGRESS.value,
-                TaskStatus.COMPLETE.value,
-            ):
-                return (
-                    f"Invalid status '{status}'. Must be 'in_progress' or 'complete'."
-                )
-
-            statuses = dict(runtime.state.get("task_statuses") or {})
-            for t in task_order:
-                statuses.setdefault(t, TaskStatus.PENDING.value)
-
-            current = statuses[task]
-
-            # Enforce valid transitions: pending -> in_progress -> complete
-            if current == TaskStatus.COMPLETE.value:
-                return f"Task '{task}' is already complete."
-
-            valid_next = {
-                TaskStatus.PENDING.value: TaskStatus.IN_PROGRESS.value,
-                TaskStatus.IN_PROGRESS.value: TaskStatus.COMPLETE.value,
-            }
-            expected = valid_next.get(current)
-            if expected != status:
-                return (
-                    f"Cannot transition '{task}' from '{current}' to "
-                    f"'{status}'. Expected next: '{expected}'."
-                )
-
-            # Enforce ordering: all prior tasks must be complete
-            if enforce_order and status == TaskStatus.IN_PROGRESS.value:
-                idx = task_order.index(task)
-                for prev in task_order[:idx]:
-                    if statuses[prev] != TaskStatus.COMPLETE.value:
-                        return (
-                            f"Cannot start '{task}': '{prev}' is not "
-                            f"complete yet. "
-                            f"Order: {' -> '.join(task_order)}."
-                        )
-
-            statuses[task] = status
-
-            display = "\n".join(f"  {k}: {v}" for k, v in statuses.items())
-            return Command(
-                update={
-                    "task_statuses": statuses,
-                    "nudge_count": 0,
-                    "messages": [
-                        ToolMessage(
-                            f"Task '{task}' -> {status}.\n\n{display}",
-                            tool_call_id=runtime.tool_call_id,
-                        )
-                    ],
-                }
+            return execute(
+                task,
+                status,
+                task_order,
+                enforce_order,
+                runtime.state,
+                runtime.tool_call_id,
             )
 
         return update_task_status
@@ -1636,7 +1538,8 @@ class WorkflowSteeringMiddleware(_TaskSteeringBase):
                 global_tools=wf.global_tools,
                 enforce_order=wf.enforce_order,
                 required_tasks=_resolve_required_tasks(
-                    wf.required_tasks, all_names,
+                    wf.required_tasks,
+                    all_names,
                     context_label=f"workflow '{wf.name}'",
                 ),
                 global_skills=wf.global_skills,
@@ -1650,23 +1553,32 @@ class WorkflowSteeringMiddleware(_TaskSteeringBase):
         all_wf_tasks = [t for wf in self._workflows for t in wf.tasks]
         self.state_schema = self._merge_state_schemas(all_wf_tasks)
 
-        self.tools = _dedup_tools([
-            self._activate_tool,
-            self._deactivate_tool,
-            self._workflow_transition_tool,
-            *(tool_obj for wf in self._workflows for tool_obj in wf.global_tools),
-            *(tool_obj for wf in self._workflows for task in wf.tasks for tool_obj in task.tools),
-            *(
-                tool_obj
-                for wf in self._workflows
-                for task in wf.tasks
-                if task.middleware and hasattr(task.middleware, "tools")
-                for tool_obj in (task.middleware.tools or [])
-            ),
-        ])
+        self.tools = _dedup_tools(
+            [
+                self._activate_tool,
+                self._deactivate_tool,
+                self._workflow_transition_tool,
+                *(tool_obj for wf in self._workflows for tool_obj in wf.global_tools),
+                *(
+                    tool_obj
+                    for wf in self._workflows
+                    for task in wf.tasks
+                    for tool_obj in task.tools
+                ),
+                *(
+                    tool_obj
+                    for wf in self._workflows
+                    for task in wf.tasks
+                    if task.middleware and hasattr(task.middleware, "tools")
+                    for tool_obj in (task.middleware.tools or [])
+                ),
+            ]
+        )
 
         # Cache invariants for hot-path use.
-        self._workflow_tool_names: frozenset[str] = frozenset(t.name for t in self.tools)
+        self._workflow_tool_names: frozenset[str] = frozenset(
+            t.name for t in self.tools
+        )
         self._catalog_text: str = self._render_catalog()
 
     # ── Pipeline context ────────────────────────────────────
@@ -1723,9 +1635,7 @@ class WorkflowSteeringMiddleware(_TaskSteeringBase):
 
     # ── Nudge message override ──────────────────────────────
 
-    def _build_nudge_message(
-        self, incomplete: list[str], state: dict
-    ) -> HumanMessage:
+    def _build_nudge_message(self, incomplete: list[str], state: dict) -> HumanMessage:
         """Workflow mode nudge includes the workflow name."""
         wf_name = state.get("active_workflow", "unknown")
         task_list = ", ".join(incomplete)
@@ -1762,58 +1672,6 @@ class WorkflowSteeringMiddleware(_TaskSteeringBase):
         lines.append("  Use activate_workflow to start a workflow when needed.")
         lines.append("</available_workflows>")
         return "\n".join(lines)
-
-    # ── Backward-compat helpers used by tests ───────────────
-
-    def _prepare_model_request(self, request, ctx=None):
-        """Backward-compat: accept (request) or (request, ctx).
-
-        When called with just (request), looks up ctx from state, handling
-        the no-workflow-active case inline.
-        """
-        if ctx is not None:
-            return _TaskSteeringBase._prepare_model_request(self, request, ctx)
-        # Old API: _prepare_model_request(request) — must handle no-ctx case
-        return self._prepare_model_request_workflow(request)
-
-    def _prepare_model_request_workflow(
-        self, request: ModelRequest
-    ) -> tuple[ModelRequest, str | None]:
-        """Backward-compat wrapper for tests that call this directly."""
-        wf_name = request.state.get("active_workflow")
-        if wf_name is None:
-            return self._build_catalog_request(request), None
-
-        ctx = self._workflow_ctxs.get(wf_name)
-        if ctx is None:
-            return request, None
-
-        return self._prepare_model_request(request, ctx)
-
-    def _render_status_block_workflow(
-        self,
-        statuses: dict[str, str],
-        active: str | None,
-        wf: Workflow,
-        state: dict | None = None,
-    ) -> str:
-        """Backward-compat wrapper for tests that call this directly."""
-        ctx = self._workflow_ctxs.get(wf.name)
-        if ctx is None:
-            return ""
-        return self._render_status_block(ctx, statuses, active, state=state)
-
-    def _allowed_tool_names_workflow(
-        self,
-        active_name: str | None,
-        wf: Workflow,
-        state: dict | None = None,
-    ) -> set[str]:
-        """Backward-compat wrapper for tests that call this directly."""
-        ctx = self._workflow_ctxs.get(wf.name)
-        if ctx is None:
-            return set()
-        return self._allowed_tool_names(ctx, active_name, state=state)
 
     # ── Workflow tool builders ──────────────────────────────
 
@@ -1893,7 +1751,8 @@ class WorkflowSteeringMiddleware(_TaskSteeringBase):
             if wf and not wf.allow_deactivate_in_progress:
                 statuses = runtime.state.get("task_statuses") or {}
                 active = [
-                    name for name, s in statuses.items()
+                    name
+                    for name, s in statuses.items()
                     if s == TaskStatus.IN_PROGRESS.value
                 ]
                 if active:
@@ -1923,9 +1782,11 @@ class WorkflowSteeringMiddleware(_TaskSteeringBase):
         """Build update_task_status for workflow mode.
 
         Reads ``active_workflow`` from state to determine task order
-        and ``enforce_order`` dynamically.
+        and ``enforce_order`` dynamically, then delegates to the shared
+        ``_execute_task_transition`` logic.
         """
         workflow_map = self._workflow_map
+        execute = _TaskSteeringBase._execute_task_transition
 
         @tool(
             name_or_callable=_TRANSITION_TOOL_NAME,
@@ -1950,65 +1811,14 @@ class WorkflowSteeringMiddleware(_TaskSteeringBase):
                 return f"Active workflow '{wf_name}' not found."
 
             task_order = [t.name for t in wf.tasks]
-
-            if task not in task_order:
-                return (
-                    f"Invalid task '{task}' for workflow '{wf_name}'. "
-                    f"Must be one of: {', '.join(task_order)}"
-                )
-
-            if status not in (
-                TaskStatus.IN_PROGRESS.value,
-                TaskStatus.COMPLETE.value,
-            ):
-                return (
-                    f"Invalid status '{status}'. Must be 'in_progress' or 'complete'."
-                )
-
-            statuses = dict(runtime.state.get("task_statuses") or {})
-            for t in task_order:
-                statuses.setdefault(t, TaskStatus.PENDING.value)
-
-            current = statuses[task]
-
-            if current == TaskStatus.COMPLETE.value:
-                return f"Task '{task}' is already complete."
-
-            valid_next = {
-                TaskStatus.PENDING.value: TaskStatus.IN_PROGRESS.value,
-                TaskStatus.IN_PROGRESS.value: TaskStatus.COMPLETE.value,
-            }
-            expected = valid_next.get(current)
-            if expected != status:
-                return (
-                    f"Cannot transition '{task}' from '{current}' to "
-                    f"'{status}'. Expected next: '{expected}'."
-                )
-
-            if wf.enforce_order and status == TaskStatus.IN_PROGRESS.value:
-                idx = task_order.index(task)
-                for prev in task_order[:idx]:
-                    if statuses[prev] != TaskStatus.COMPLETE.value:
-                        return (
-                            f"Cannot start '{task}': '{prev}' is not "
-                            f"complete yet. "
-                            f"Order: {' -> '.join(task_order)}."
-                        )
-
-            statuses[task] = status
-
-            display = "\n".join(f"  {k}: {v}" for k, v in statuses.items())
-            return Command(
-                update={
-                    "task_statuses": statuses,
-                    "nudge_count": 0,
-                    "messages": [
-                        ToolMessage(
-                            f"Task '{task}' -> {status}.\n\n{display}",
-                            tool_call_id=runtime.tool_call_id,
-                        )
-                    ],
-                }
+            return execute(
+                task,
+                status,
+                task_order,
+                wf.enforce_order,
+                runtime.state,
+                runtime.tool_call_id,
+                context_label=f"workflow '{wf_name}'",
             )
 
         return update_task_status

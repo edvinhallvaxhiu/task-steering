@@ -118,7 +118,9 @@ class TestWorkflowInit:
 
     def test_rejects_duplicate_workflow_names(self, onboarding_tasks):
         wf = Workflow(
-            name="dup", description="A", tasks=onboarding_tasks,
+            name="dup",
+            description="A",
+            tasks=onboarding_tasks,
         )
         with pytest.raises(ValueError, match="Duplicate workflow names"):
             WorkflowSteeringMiddleware(workflows=[wf, wf])
@@ -140,7 +142,9 @@ class TestWorkflowInit:
     def test_rejects_unknown_required_tasks(self):
         tasks = [Task(name="a", instruction="A", tools=[tool_a])]
         wf = Workflow(
-            name="wf", description="WF", tasks=tasks,
+            name="wf",
+            description="WF",
+            tasks=tasks,
             required_tasks=["nonexistent"],
         )
         with pytest.raises(ValueError, match="Unknown required tasks"):
@@ -183,7 +187,8 @@ class TestWorkflowBeforeAgent:
     def test_noop_even_without_task_statuses(self, wf_middleware):
         """Workflow mode doesn't init task_statuses — that's done by activate."""
         result = wf_middleware.before_agent(
-            {"messages": [], "task_statuses": None}, runtime=None,
+            {"messages": [], "task_statuses": None},
+            runtime=None,
         )
         assert result is None
 
@@ -197,7 +202,9 @@ class TestActivateWorkflow:
     def test_happy_path(self, wf_middleware):
         state = {"active_workflow": None, "messages": []}
         result = _invoke_tool(
-            wf_middleware._activate_tool, state, workflow="onboarding",
+            wf_middleware._activate_tool,
+            state,
+            workflow="onboarding",
         )
         assert isinstance(result, Command)
         assert result.update["active_workflow"] == "onboarding"
@@ -209,7 +216,9 @@ class TestActivateWorkflow:
     def test_unknown_workflow(self, wf_middleware):
         state = {"active_workflow": None}
         result = _invoke_tool(
-            wf_middleware._activate_tool, state, workflow="nonexistent",
+            wf_middleware._activate_tool,
+            state,
+            workflow="nonexistent",
         )
         assert isinstance(result, str)
         assert "Unknown workflow" in result
@@ -217,7 +226,9 @@ class TestActivateWorkflow:
     def test_already_active(self, wf_middleware):
         state = {"active_workflow": "support"}
         result = _invoke_tool(
-            wf_middleware._activate_tool, state, workflow="onboarding",
+            wf_middleware._activate_tool,
+            state,
+            workflow="onboarding",
         )
         assert isinstance(result, str)
         assert "already active" in result
@@ -225,7 +236,9 @@ class TestActivateWorkflow:
     def test_initializes_nudge_count(self, wf_middleware):
         state = {"active_workflow": None, "messages": []}
         result = _invoke_tool(
-            wf_middleware._activate_tool, state, workflow="onboarding",
+            wf_middleware._activate_tool,
+            state,
+            workflow="onboarding",
         )
         assert result.update["nudge_count"] == 0
 
@@ -466,7 +479,8 @@ class TestWorkflowToolScoping:
             {"active_workflow": None, "messages": []},
             all_tools,
         )
-        modified, active = wf_middleware._prepare_model_request(request)
+        modified = wf_middleware._build_catalog_request(request)
+        active = None
         tool_names = {t.name for t in modified.tools}
         # activate_workflow is injected, external tool passes through
         assert _ACTIVATE_TOOL_NAME in tool_names
@@ -489,7 +503,8 @@ class TestWorkflowToolScoping:
             },
             wf_middleware.tools,
         )
-        modified, active = wf_middleware._prepare_model_request(request)
+        ctx = wf_middleware._workflow_ctxs["onboarding"]
+        modified, active = wf_middleware._prepare_model_request(request, ctx)
         tool_names = {t.name for t in modified.tools}
         assert _TRANSITION_TOOL_NAME in tool_names
         assert _DEACTIVATE_TOOL_NAME in tool_names
@@ -514,7 +529,8 @@ class TestWorkflowToolScoping:
             },
             wf_middleware.tools,
         )
-        modified, active = wf_middleware._prepare_model_request(request)
+        ctx = wf_middleware._workflow_ctxs["onboarding"]
+        modified, active = wf_middleware._prepare_model_request(request, ctx)
         tool_names = {t.name for t in modified.tools}
         assert _TRANSITION_TOOL_NAME in tool_names
         assert _DEACTIVATE_TOOL_NAME in tool_names
@@ -541,10 +557,12 @@ class TestWorkflowPromptRendering:
         assert "activate_workflow" in block
 
     def test_active_workflow_pipeline_view(self, wf_middleware):
-        wf = wf_middleware._workflow_map["onboarding"]
+        ctx = wf_middleware._workflow_ctxs["onboarding"]
         statuses = {"collect_info": "in_progress", "verify": "pending"}
-        block = wf_middleware._render_status_block_workflow(
-            statuses, "collect_info", wf,
+        block = wf_middleware._render_status_block(
+            ctx,
+            statuses,
+            "collect_info",
         )
         assert '<task_pipeline workflow="onboarding">' in block
         assert "[>] collect_info (in_progress)" in block
@@ -559,10 +577,12 @@ class TestWorkflowPromptRendering:
             system_message=MockSystemMessage("Base."),
             tools=wf_middleware.tools,
         )
-        modified, _ = wf_middleware._prepare_model_request(request)
+        modified = wf_middleware._build_catalog_request(request)
         content = modified.system_message.content
         text_blocks = [
-            b["text"] for b in content if isinstance(b, dict) and b.get("type") == "text"
+            b["text"]
+            for b in content
+            if isinstance(b, dict) and b.get("type") == "text"
         ]
         full = "\n".join(text_blocks)
         assert "<available_workflows>" in full
@@ -580,10 +600,13 @@ class TestWorkflowPromptRendering:
             system_message=MockSystemMessage("Base."),
             tools=wf_middleware.tools,
         )
-        modified, _ = wf_middleware._prepare_model_request(request)
+        ctx = wf_middleware._workflow_ctxs["onboarding"]
+        modified, _ = wf_middleware._prepare_model_request(request, ctx)
         content = modified.system_message.content
         text_blocks = [
-            b["text"] for b in content if isinstance(b, dict) and b.get("type") == "text"
+            b["text"]
+            for b in content
+            if isinstance(b, dict) and b.get("type") == "text"
         ]
         full = "\n".join(text_blocks)
         assert "<task_pipeline" in full
@@ -598,7 +621,11 @@ class TestWorkflowPromptRendering:
 class TestWorkflowWrapToolCall:
     def test_activate_passes_through(self, wf_middleware):
         request = MockToolCallRequest(
-            tool_call={"name": _ACTIVATE_TOOL_NAME, "id": "c1", "args": {"workflow": "onboarding"}},
+            tool_call={
+                "name": _ACTIVATE_TOOL_NAME,
+                "id": "c1",
+                "args": {"workflow": "onboarding"},
+            },
             state={"active_workflow": None},
         )
         result = wf_middleware.wrap_tool_call(request, lambda r: "handled")
@@ -677,7 +704,9 @@ class TestWorkflowWrapToolCall:
                 },
                 "nudge_count": 0,
                 "messages": [
-                    ToolMessage("Task 'collect_info' -> in_progress.", tool_call_id="c1")
+                    ToolMessage(
+                        "Task 'collect_info' -> in_progress.", tool_call_id="c1"
+                    )
                 ],
             }
         )
@@ -951,19 +980,17 @@ class TestWorkflowBackendPassthrough:
             tasks=onboarding_tasks,
         )
         mw = WorkflowSteeringMiddleware(
-            workflows=[wf], backend_tools_passthrough=True,
+            workflows=[wf],
+            backend_tools_passthrough=True,
         )
-        allowed = mw._allowed_tool_names_workflow(
-            "collect_info", wf,
-        )
+        ctx = mw._workflow_ctxs["wf"]
+        allowed = mw._allowed_tool_names(ctx, "collect_info")
         assert "read_file" in allowed
         assert "ls" in allowed
 
     def test_backend_tools_not_available_by_default(self, wf_middleware):
-        wf = wf_middleware._workflow_map["onboarding"]
-        allowed = wf_middleware._allowed_tool_names_workflow(
-            "collect_info", wf,
-        )
+        ctx = wf_middleware._workflow_ctxs["onboarding"]
+        allowed = wf_middleware._allowed_tool_names(ctx, "collect_info")
         assert "read_file" not in allowed
 
 
@@ -983,7 +1010,9 @@ class TestWorkflowEndToEnd:
 
         # 2. Activate onboarding
         result = _invoke_tool(
-            wf_middleware._activate_tool, state, workflow="onboarding",
+            wf_middleware._activate_tool,
+            state,
+            workflow="onboarding",
         )
         assert isinstance(result, Command)
         state.update(result.update)
@@ -1037,7 +1066,9 @@ class TestWorkflowEndToEnd:
 
         # 8. Now activate support
         result = _invoke_tool(
-            wf_middleware._activate_tool, state, workflow="support",
+            wf_middleware._activate_tool,
+            state,
+            workflow="support",
         )
         assert isinstance(result, Command)
         state.update(result.update)

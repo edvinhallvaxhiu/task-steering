@@ -67,7 +67,7 @@ class TestBackendToolsInit:
             backend_tools_passthrough=True,
         )
         assert mw._backend_tools_passthrough is True
-        allowed = mw._allowed_tool_names("a")
+        allowed = mw._allowed_tool_names(mw._ctx, "a")
         assert "read_file" in allowed
 
 
@@ -91,7 +91,7 @@ class TestBackendToolsScoping:
 
     def test_passthrough_adds_tools_to_allowed(self):
         mw = self._make_middleware(passthrough=True)
-        allowed = mw._allowed_tool_names("step_1")
+        allowed = mw._allowed_tool_names(mw._ctx, "step_1")
         assert "read_file" in allowed
         assert "write_file" in allowed
         assert "execute" in allowed
@@ -100,13 +100,13 @@ class TestBackendToolsScoping:
 
     def test_passthrough_disabled_does_not_add(self):
         mw = self._make_middleware(passthrough=False)
-        allowed = mw._allowed_tool_names("step_1")
+        allowed = mw._allowed_tool_names(mw._ctx, "step_1")
         assert "read_file" not in allowed
         assert "write_file" not in allowed
 
     def test_passthrough_combines_with_task_tools(self):
         mw = self._make_middleware(passthrough=True)
-        allowed = mw._allowed_tool_names("step_2")
+        allowed = mw._allowed_tool_names(mw._ctx, "step_2")
         assert "tool_b" in allowed
         assert "tool_a" not in allowed  # belongs to step_1
         assert "ls" in allowed
@@ -114,7 +114,7 @@ class TestBackendToolsScoping:
 
     def test_passthrough_with_no_active_task(self):
         mw = self._make_middleware(passthrough=True)
-        allowed = mw._allowed_tool_names(None)
+        allowed = mw._allowed_tool_names(mw._ctx, None)
         assert "read_file" in allowed
         assert "ls" in allowed
         assert "tool_a" not in allowed
@@ -125,7 +125,7 @@ class TestBackendToolsScoping:
             passthrough=True,
             backend_tools={"custom_tool"},
         )
-        allowed = mw._allowed_tool_names("step_1")
+        allowed = mw._allowed_tool_names(mw._ctx, "step_1")
         assert "custom_tool" in allowed
         assert "read_file" not in allowed  # not in custom set
 

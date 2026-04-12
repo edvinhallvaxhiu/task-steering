@@ -5,6 +5,11 @@ import {
   TaskMiddleware,
   getContentBlocks,
   validateTaskSummarization,
+  _getStatuses,
+  _getActiveTask,
+  _getAllowedToolNames,
+  _renderStatusBlock,
+  type _PipelineContext,
   type Task,
   type TaskSummarization,
   type ModelRequest,
@@ -25,6 +30,23 @@ const toolC: ToolLike = { name: 'tool_c', description: 'Tool C' }
 const globalRead: ToolLike = {
   name: 'global_read',
   description: 'Global read tool',
+}
+
+// ── Helper to call shared tool-scoping for a TaskSteeringMiddleware ──
+
+function mwAllowedToolNames(
+  mw: TaskSteeringMiddleware,
+  activeName: string | null,
+  state?: Record<string, unknown>
+): Set<string> {
+  return _getAllowedToolNames(
+    mw._ctx,
+    activeName,
+    new Set(),
+    (mw as any)._backendToolsPassthrough as boolean,
+    (mw as any)._backendTools as ReadonlySet<string>,
+    state
+  )
 }
 
 // ── Mock request helpers ────────────────────────────────
@@ -141,12 +163,12 @@ describe('Init', () => {
 
   it('preserves task order', () => {
     const mw = createMiddleware()
-    expect((mw as any)._taskOrder).toEqual(['step_1', 'step_2', 'step_3'])
+    expect(mw._ctx.taskOrder).toEqual(['step_1', 'step_2', 'step_3'])
   })
 
   it('builds task map', () => {
     const mw = createMiddleware()
-    const map = (mw as any)._taskMap as Map<string, Task>
+    const map = mw._ctx.taskMap as Map<string, Task>
     expect([...map.keys()]).toEqual(['step_1', 'step_2', 'step_3'])
     expect(map.get('step_1')!.instruction).toBe('Do step 1.')
   })
@@ -184,7 +206,7 @@ describe('Init', () => {
 
   it('enforceOrder defaults to true', () => {
     const mw = createMiddleware()
-    expect((mw as any)._enforceOrder).toBe(true)
+    expect(mw._ctx.enforceOrder).toBe(true)
   })
 
   it('enforceOrder can be set to false', () => {
@@ -192,7 +214,7 @@ describe('Init', () => {
       tasks: threeTasks(),
       enforceOrder: false,
     })
-    expect((mw as any)._enforceOrder).toBe(false)
+    expect(mw._ctx.enforceOrder).toBe(false)
   })
 })
 
@@ -246,14 +268,14 @@ describe('beforeAgent', () => {
 describe('Status helpers', () => {
   it('defaults to pending when no state', () => {
     const mw = createMiddleware()
-    const statuses = (mw as any)._getStatuses({})
+    const statuses = _getStatuses(mw._ctx, {})
     expect(Object.values(statuses).every((v: string) => v === 'pending')).toBe(true)
     expect(Object.keys(statuses).length).toBe(3)
   })
 
   it('reads from state', () => {
     const mw = createMiddleware()
-    const statuses = (mw as any)._getStatuses({
+    const statuses = _getStatuses(mw._ctx, {
       taskStatuses: {
         step_1: 'complete',
         step_2: 'in_progress',
@@ -269,7 +291,7 @@ describe('Status helpers', () => {
 
   it('handles null taskStatuses', () => {
     const mw = createMiddleware()
-    const statuses = (mw as any)._getStatuses({ taskStatuses: null })
+    const statuses = _getStatuses(mw._ctx, { taskStatuses: null })
     expect(Object.values(statuses).every((v: string) => v === 'pending')).toBe(true)
   })
 
@@ -280,7 +302,7 @@ describe('Status helpers', () => {
       step_2: 'pending',
       step_3: 'pending',
     }
-    expect((mw as any)._activeTask(statuses)).toBeNull()
+    expect(_getActiveTask(mw._ctx, statuses)).toBeNull()
   })
 
   it('activeTask returns null when all complete', () => {
@@ -290,7 +312,7 @@ describe('Status helpers', () => {
       step_2: 'complete',
       step_3: 'complete',
     }
-    expect((mw as any)._activeTask(statuses)).toBeNull()
+    expect(_getActiveTask(mw._ctx, statuses)).toBeNull()
   })
 
   it('activeTask finds in_progress', () => {
@@ -300,7 +322,7 @@ describe('Status helpers', () => {
       step_2: 'in_progress',
       step_3: 'pending',
     }
-    expect((mw as any)._activeTask(statuses)).toBe('step_2')
+    expect(_getActiveTask(mw._ctx, statuses)).toBe('step_2')
   })
 
   it('activeTask returns first in_progress', () => {
@@ -310,7 +332,7 @@ describe('Status helpers', () => {
       step_2: 'in_progress',
       step_3: 'pending',
     }
-    expect((mw as any)._activeTask(statuses)).toBe('step_1')
+    expect(_getActiveTask(mw._ctx, statuses)).toBe('step_1')
   })
 })
 
@@ -326,7 +348,7 @@ describe('Prompt rendering', () => {
       step_2: 'pending',
       step_3: 'pending',
     }
-    const block = mw._renderStatusBlock(statuses, null)
+    const block = _renderStatusBlock(mw._ctx, statuses, null)
     expect(block).toContain('<task_pipeline>')
     expect(block).toContain('[ ] step_1 (pending)')
     expect(block).toContain('[ ] step_2 (pending)')
@@ -342,7 +364,7 @@ describe('Prompt rendering', () => {
       step_2: 'pending',
       step_3: 'pending',
     }
-    const block = mw._renderStatusBlock(statuses, 'step_1')
+    const block = _renderStatusBlock(mw._ctx, statuses, 'step_1')
     expect(block).toContain('[>] step_1 (in_progress)')
     expect(block).toContain('<current_task name="step_1">')
     expect(block).toContain('Do step 1.')
@@ -355,7 +377,7 @@ describe('Prompt rendering', () => {
       step_2: 'complete',
       step_3: 'in_progress',
     }
-    const block = mw._renderStatusBlock(statuses, 'step_3')
+    const block = _renderStatusBlock(mw._ctx, statuses, 'step_3')
     expect(block).toContain('[x] step_1 (complete)')
     expect(block).toContain('[x] step_2 (complete)')
     expect(block).toContain('[>] step_3 (in_progress)')
@@ -369,7 +391,7 @@ describe('Prompt rendering', () => {
       step_2: 'pending',
       step_3: 'pending',
     }
-    const block = mw._renderStatusBlock(statuses, null)
+    const block = _renderStatusBlock(mw._ctx, statuses, null)
     expect(block).toContain('<rules>')
     expect(block).toContain('Required order: step_1 -> step_2 -> step_3')
     expect(block).toContain('Do not skip tasks.')
@@ -385,7 +407,7 @@ describe('Prompt rendering', () => {
       step_2: 'pending',
       step_3: 'pending',
     }
-    const block = mw._renderStatusBlock(statuses, null)
+    const block = _renderStatusBlock(mw._ctx, statuses, null)
     expect(block).not.toContain('<rules>')
   })
 })
@@ -397,13 +419,13 @@ describe('Prompt rendering', () => {
 describe('Tool scoping', () => {
   it('no active task returns globals + transition', () => {
     const mw = createMiddleware()
-    const names = mw._allowedToolNames(null)
+    const names = mwAllowedToolNames(mw, null)
     expect(names).toEqual(new Set(['update_task_status', 'global_read']))
   })
 
   it('step_1 active', () => {
     const mw = createMiddleware()
-    const names = mw._allowedToolNames('step_1')
+    const names = mwAllowedToolNames(mw, 'step_1')
     expect(names.has('tool_a')).toBe(true)
     expect(names.has('update_task_status')).toBe(true)
     expect(names.has('global_read')).toBe(true)
@@ -413,7 +435,7 @@ describe('Tool scoping', () => {
 
   it('step_2 active', () => {
     const mw = createMiddleware()
-    const names = mw._allowedToolNames('step_2')
+    const names = mwAllowedToolNames(mw, 'step_2')
     expect(names.has('tool_b')).toBe(true)
     expect(names.has('tool_a')).toBe(false)
     expect(names.has('tool_c')).toBe(false)
@@ -421,7 +443,7 @@ describe('Tool scoping', () => {
 
   it('step_3 active', () => {
     const mw = createMiddleware()
-    const names = mw._allowedToolNames('step_3')
+    const names = mwAllowedToolNames(mw, 'step_3')
     expect(names.has('tool_c')).toBe(true)
     expect(names.has('tool_a')).toBe(false)
     expect(names.has('tool_b')).toBe(false)
@@ -1042,7 +1064,7 @@ describe('executeTransition', () => {
 describe('Required tasks init', () => {
   it('default is all', () => {
     const mw = new TaskSteeringMiddleware({ tasks: threeTasks() })
-    expect((mw as any)._requiredTasks).toEqual(new Set(['step_1', 'step_2', 'step_3']))
+    expect(mw._ctx.requiredTasks).toEqual(new Set(['step_1', 'step_2', 'step_3']))
   })
 
   it('wildcard resolves to all', () => {
@@ -1050,7 +1072,7 @@ describe('Required tasks init', () => {
       tasks: threeTasks(),
       requiredTasks: ['*'],
     })
-    expect((mw as any)._requiredTasks).toEqual(new Set(['step_1', 'step_2', 'step_3']))
+    expect(mw._ctx.requiredTasks).toEqual(new Set(['step_1', 'step_2', 'step_3']))
   })
 
   it('explicit subset', () => {
@@ -1058,7 +1080,7 @@ describe('Required tasks init', () => {
       tasks: threeTasks(),
       requiredTasks: ['step_1', 'step_3'],
     })
-    expect((mw as any)._requiredTasks).toEqual(new Set(['step_1', 'step_3']))
+    expect(mw._ctx.requiredTasks).toEqual(new Set(['step_1', 'step_3']))
   })
 
   it('null means no required', () => {
@@ -1066,7 +1088,7 @@ describe('Required tasks init', () => {
       tasks: threeTasks(),
       requiredTasks: null,
     })
-    expect((mw as any)._requiredTasks).toEqual(new Set())
+    expect(mw._ctx.requiredTasks).toEqual(new Set())
   })
 
   it('unknown task raises', () => {
@@ -1458,13 +1480,13 @@ describe('middleware list composition', () => {
     const tasks: Task[] = [{ name: 'a', instruction: 'A', tools: [], middleware: [spy] }]
     const mw = new TaskSteeringMiddleware({ tasks })
     // Should be the same instance, not a composed wrapper
-    expect((mw as any)._taskMap.get('a').middleware).toBe(spy)
+    expect(mw._ctx.taskMap.get('a').middleware).toBe(spy)
   })
 
   it('empty list becomes undefined', () => {
     const tasks: Task[] = [{ name: 'a', instruction: 'A', tools: [], middleware: [] }]
     const mw = new TaskSteeringMiddleware({ tasks })
-    expect((mw as any)._taskMap.get('a').middleware).toBeUndefined()
+    expect(mw._ctx.taskMap.get('a').middleware).toBeUndefined()
   })
 
   it('wrapModelCall chains in order (first = outermost)', () => {
@@ -1611,7 +1633,7 @@ describe('middleware list composition', () => {
     ]
     const mw = new TaskSteeringMiddleware({ tasks })
 
-    const names = mw._allowedToolNames('a')
+    const names = mwAllowedToolNames(mw, 'a')
     expect(names.has('extra_tool')).toBe(true)
     expect(names.has('tool_a')).toBe(true)
   })
@@ -1689,7 +1711,7 @@ describe('auto-wrapping raw agent middleware', () => {
     const validator = new TaskMiddleware()
     const tasks: Task[] = [{ name: 'a', instruction: 'A', tools: [], middleware: validator }]
     const mw = new TaskSteeringMiddleware({ tasks })
-    expect((mw as any)._taskMap.get('a').middleware).toBe(validator)
+    expect(mw._ctx.taskMap.get('a').middleware).toBe(validator)
   })
 
   it('invalid middleware warns and is ignored', () => {
@@ -1700,7 +1722,7 @@ describe('auto-wrapping raw agent middleware', () => {
     ]
     const mw = new TaskSteeringMiddleware({ tasks })
 
-    expect((mw as any)._taskMap.get('a').middleware).toBeUndefined()
+    expect(mw._ctx.taskMap.get('a').middleware).toBeUndefined()
     expect(warnSpy).toHaveBeenCalledOnce()
     expect(warnSpy.mock.calls[0][0]).toContain('Ignoring invalid task middleware')
 
@@ -1721,7 +1743,7 @@ describe('auto-wrapping raw agent middleware', () => {
     ]
     const mw = new TaskSteeringMiddleware({ tasks })
 
-    expect((mw as any)._taskMap.get('a').middleware).toBeDefined()
+    expect(mw._ctx.taskMap.get('a').middleware).toBeDefined()
     expect(warnSpy).toHaveBeenCalledOnce()
 
     // Validator still works

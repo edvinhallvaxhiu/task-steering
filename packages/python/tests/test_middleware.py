@@ -50,11 +50,11 @@ class TestInit:
             TaskSteeringMiddleware(tasks=[])
 
     def test_task_order_preserved(self, middleware):
-        assert middleware._task_order == ["step_1", "step_2", "step_3"]
+        assert middleware._ctx.task_order == ["step_1", "step_2", "step_3"]
 
     def test_task_map(self, middleware):
-        assert set(middleware._task_map.keys()) == {"step_1", "step_2", "step_3"}
-        assert middleware._task_map["step_1"].instruction == "Do step 1."
+        assert set(middleware._ctx.task_map.keys()) == {"step_1", "step_2", "step_3"}
+        assert middleware._ctx.task_map["step_1"].instruction == "Do step 1."
 
     def test_all_tools_auto_registered(self, middleware):
         names = {t.name for t in middleware.tools}
@@ -84,11 +84,11 @@ class TestInit:
             TaskSteeringMiddleware(tasks=tasks)
 
     def test_enforce_order_default_true(self, middleware):
-        assert middleware._enforce_order is True
+        assert middleware._ctx.enforce_order is True
 
     def test_enforce_order_false(self, three_tasks):
         mw = TaskSteeringMiddleware(tasks=three_tasks, enforce_order=False)
-        assert mw._enforce_order is False
+        assert mw._ctx.enforce_order is False
 
 
 # ════════════════════════════════════════════════════════════
@@ -138,7 +138,7 @@ class TestBeforeAgent:
 
 class TestStatusHelpers:
     def test_get_statuses_defaults_to_pending(self, middleware):
-        statuses = middleware._get_statuses({})
+        statuses = middleware._get_statuses(middleware._ctx, {})
         assert all(v == "pending" for v in statuses.values())
         assert len(statuses) == 3
 
@@ -150,7 +150,7 @@ class TestStatusHelpers:
                 "step_3": "pending",
             }
         }
-        statuses = middleware._get_statuses(state)
+        statuses = middleware._get_statuses(middleware._ctx, state)
         assert statuses == {
             "step_1": "complete",
             "step_2": "in_progress",
@@ -158,20 +158,20 @@ class TestStatusHelpers:
         }
 
     def test_get_statuses_handles_none(self, middleware):
-        statuses = middleware._get_statuses({"task_statuses": None})
+        statuses = middleware._get_statuses(middleware._ctx, {"task_statuses": None})
         assert all(v == "pending" for v in statuses.values())
 
     def test_active_task_none_when_all_pending(self, middleware):
         statuses = {"step_1": "pending", "step_2": "pending", "step_3": "pending"}
-        assert middleware._active_task(statuses) is None
+        assert middleware._active_task(middleware._ctx, statuses) is None
 
     def test_active_task_none_when_all_complete(self, middleware):
         statuses = {"step_1": "complete", "step_2": "complete", "step_3": "complete"}
-        assert middleware._active_task(statuses) is None
+        assert middleware._active_task(middleware._ctx, statuses) is None
 
     def test_active_task_finds_in_progress(self, middleware):
         statuses = {"step_1": "complete", "step_2": "in_progress", "step_3": "pending"}
-        assert middleware._active_task(statuses) == "step_2"
+        assert middleware._active_task(middleware._ctx, statuses) == "step_2"
 
     def test_active_task_returns_first_in_progress(self, middleware):
         """If multiple tasks are in_progress (shouldn't happen), returns first."""
@@ -180,7 +180,7 @@ class TestStatusHelpers:
             "step_2": "in_progress",
             "step_3": "pending",
         }
-        assert middleware._active_task(statuses) == "step_1"
+        assert middleware._active_task(middleware._ctx, statuses) == "step_1"
 
 
 # ════════════════════════════════════════════════════════════
@@ -191,7 +191,7 @@ class TestStatusHelpers:
 class TestPromptRendering:
     def test_all_pending_no_active(self, middleware):
         statuses = {"step_1": "pending", "step_2": "pending", "step_3": "pending"}
-        block = middleware._render_status_block(statuses, active=None)
+        block = middleware._render_status_block(middleware._ctx, statuses, None)
         assert "<task_pipeline>" in block
         assert "[ ] step_1 (pending)" in block
         assert "[ ] step_2 (pending)" in block
@@ -201,14 +201,14 @@ class TestPromptRendering:
 
     def test_active_task_shows_instruction(self, middleware):
         statuses = {"step_1": "in_progress", "step_2": "pending", "step_3": "pending"}
-        block = middleware._render_status_block(statuses, active="step_1")
+        block = middleware._render_status_block(middleware._ctx, statuses, "step_1")
         assert "[>] step_1 (in_progress)" in block
         assert '<current_task name="step_1">' in block
         assert "Do step 1." in block
 
     def test_mixed_statuses(self, middleware):
         statuses = {"step_1": "complete", "step_2": "complete", "step_3": "in_progress"}
-        block = middleware._render_status_block(statuses, active="step_3")
+        block = middleware._render_status_block(middleware._ctx, statuses, "step_3")
         assert "[x] step_1 (complete)" in block
         assert "[x] step_2 (complete)" in block
         assert "[>] step_3 (in_progress)" in block
@@ -216,7 +216,7 @@ class TestPromptRendering:
 
     def test_rules_when_enforce_order(self, middleware):
         statuses = {"step_1": "pending", "step_2": "pending", "step_3": "pending"}
-        block = middleware._render_status_block(statuses, active=None)
+        block = middleware._render_status_block(middleware._ctx, statuses, None)
         assert "<rules>" in block
         assert "Required order: step_1 -> step_2 -> step_3" in block
         assert "Do not skip tasks." in block
@@ -224,7 +224,7 @@ class TestPromptRendering:
     def test_no_rules_when_order_not_enforced(self, three_tasks):
         mw = TaskSteeringMiddleware(tasks=three_tasks, enforce_order=False)
         statuses = {"step_1": "pending", "step_2": "pending", "step_3": "pending"}
-        block = mw._render_status_block(statuses, active=None)
+        block = mw._render_status_block(mw._ctx, statuses, None)
         assert "<rules>" not in block
 
 
@@ -235,11 +235,11 @@ class TestPromptRendering:
 
 class TestToolScoping:
     def test_no_active_task(self, middleware):
-        names = middleware._allowed_tool_names(active_name=None)
+        names = middleware._allowed_tool_names(middleware._ctx, None)
         assert names == {"update_task_status", "global_read"}
 
     def test_step_1_active(self, middleware):
-        names = middleware._allowed_tool_names(active_name="step_1")
+        names = middleware._allowed_tool_names(middleware._ctx, "step_1")
         assert "tool_a" in names
         assert "update_task_status" in names
         assert "global_read" in names
@@ -247,13 +247,13 @@ class TestToolScoping:
         assert "tool_c" not in names
 
     def test_step_2_active(self, middleware):
-        names = middleware._allowed_tool_names(active_name="step_2")
+        names = middleware._allowed_tool_names(middleware._ctx, "step_2")
         assert "tool_b" in names
         assert "tool_a" not in names
         assert "tool_c" not in names
 
     def test_step_3_active(self, middleware):
-        names = middleware._allowed_tool_names(active_name="step_3")
+        names = middleware._allowed_tool_names(middleware._ctx, "step_3")
         assert "tool_c" in names
         assert "tool_a" not in names
         assert "tool_b" not in names
@@ -939,21 +939,21 @@ class TestScenario:
 class TestRequiredTasksInit:
     def test_default_is_all(self, three_tasks):
         mw = TaskSteeringMiddleware(tasks=three_tasks)
-        assert mw._required_tasks == {"step_1", "step_2", "step_3"}
+        assert mw._ctx.required_tasks == {"step_1", "step_2", "step_3"}
 
     def test_wildcard_resolves_to_all(self, three_tasks):
         mw = TaskSteeringMiddleware(tasks=three_tasks, required_tasks=["*"])
-        assert mw._required_tasks == {"step_1", "step_2", "step_3"}
+        assert mw._ctx.required_tasks == {"step_1", "step_2", "step_3"}
 
     def test_explicit_subset(self, three_tasks):
         mw = TaskSteeringMiddleware(
             tasks=three_tasks, required_tasks=["step_1", "step_3"]
         )
-        assert mw._required_tasks == {"step_1", "step_3"}
+        assert mw._ctx.required_tasks == {"step_1", "step_3"}
 
     def test_none_means_no_required(self, three_tasks):
         mw = TaskSteeringMiddleware(tasks=three_tasks, required_tasks=None)
-        assert mw._required_tasks == set()
+        assert mw._ctx.required_tasks == set()
 
     def test_unknown_task_raises(self, three_tasks):
         with pytest.raises(ValueError, match="Unknown required tasks"):
@@ -1706,12 +1706,12 @@ class TestMiddlewareListComposition:
         spy = AllowCompletionMiddleware()
         tasks = [Task(name="a", instruction="A", tools=[], middleware=[spy])]
         mw = TaskSteeringMiddleware(tasks=tasks)
-        assert mw._task_map["a"].middleware is spy
+        assert mw._ctx.task_map["a"].middleware is spy
 
     def test_empty_list_becomes_none(self):
         tasks = [Task(name="a", instruction="A", tools=[], middleware=[])]
         mw = TaskSteeringMiddleware(tasks=tasks)
-        assert mw._task_map["a"].middleware is None
+        assert mw._ctx.task_map["a"].middleware is None
 
     def test_wrap_model_call_chains_in_order(self):
         """First middleware in list = outermost wrapper."""
@@ -1854,7 +1854,7 @@ class TestMiddlewareListComposition:
         ]
         mw = TaskSteeringMiddleware(tasks=tasks)
 
-        names = mw._allowed_tool_names(active_name="a")
+        names = mw._allowed_tool_names(mw._ctx, "a")
         assert "extra_tool" in names
         assert "tool_a" in names
 
@@ -1935,7 +1935,7 @@ class TestAutoWrapping:
         mw = TaskSteeringMiddleware(tasks=tasks)
 
         # Should have been wrapped
-        assert isinstance(mw._task_map["a"].middleware, AgentMiddlewareAdapter)
+        assert isinstance(mw._ctx.task_map["a"].middleware, AgentMiddlewareAdapter)
 
         # Should still work
         request = MockModelRequest(
@@ -2000,8 +2000,8 @@ class TestAutoWrapping:
         tasks = [Task(name="a", instruction="A", tools=[], middleware=mw_instance)]
         mw = TaskSteeringMiddleware(tasks=tasks)
 
-        assert mw._task_map["a"].middleware is mw_instance
-        assert not isinstance(mw._task_map["a"].middleware, AgentMiddlewareAdapter)
+        assert mw._ctx.task_map["a"].middleware is mw_instance
+        assert not isinstance(mw._ctx.task_map["a"].middleware, AgentMiddlewareAdapter)
 
     def test_invalid_middleware_warns_and_ignored(self):
         """Passing an invalid object should warn and be ignored."""
@@ -2019,7 +2019,7 @@ class TestAutoWrapping:
             ]
             mw = TaskSteeringMiddleware(tasks=tasks)
 
-        assert mw._task_map["a"].middleware is None
+        assert mw._ctx.task_map["a"].middleware is None
         assert len(w) == 1
         assert "Ignoring invalid task middleware" in str(w[0].message)
 
@@ -2040,7 +2040,7 @@ class TestAutoWrapping:
             mw = TaskSteeringMiddleware(tasks=tasks)
 
         # Invalid 42 is skipped, RejectCompletionMiddleware survives
-        assert mw._task_map["a"].middleware is not None
+        assert mw._ctx.task_map["a"].middleware is not None
         assert len(w) == 1
         assert "Ignoring invalid task middleware" in str(w[0].message)
 
@@ -2072,7 +2072,7 @@ class TestAutoWrapping:
         tasks = [Task(name="a", instruction="A", tools=[tool_a], middleware=duck)]
         mw = TaskSteeringMiddleware(tasks=tasks)
 
-        assert mw._task_map["a"].middleware is not None
+        assert mw._ctx.task_map["a"].middleware is not None
 
         request = MockModelRequest(
             state={"task_statuses": {"a": "in_progress"}},

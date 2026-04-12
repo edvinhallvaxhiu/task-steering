@@ -1,11 +1,27 @@
 import { describe, it, expect, vi } from 'vitest'
 import {
   TaskSteeringMiddleware,
+  _getAllowedToolNames,
   type Task,
   type ToolLike,
   type ModelRequest,
   type SystemMessageLike,
 } from '../src/index.js'
+
+function mwAllowedToolNames(
+  mw: TaskSteeringMiddleware,
+  activeName: string | null,
+  state?: Record<string, unknown>
+): Set<string> {
+  return _getAllowedToolNames(
+    mw._ctx,
+    activeName,
+    new Set(),
+    (mw as any)._backendToolsPassthrough as boolean,
+    (mw as any)._backendTools as ReadonlySet<string>,
+    state
+  )
+}
 
 // ── Mock tools ──────────────────────────────────────────────
 
@@ -86,7 +102,7 @@ describe('Backend tools init', () => {
       backendToolsPassthrough: true,
     })
     expect((mw as any)._backendToolsPassthrough).toBe(true)
-    const allowed = mw._allowedToolNames('a')
+    const allowed = mwAllowedToolNames(mw, 'a')
     expect(allowed.has('read_file')).toBe(true)
   })
 
@@ -124,7 +140,7 @@ describe('Backend tools scoping', () => {
 
   it('passthrough adds backend tools to allowed', () => {
     const mw = makeMiddleware(true)
-    const allowed = mw._allowedToolNames('step_1')
+    const allowed = mwAllowedToolNames(mw, 'step_1')
     expect(allowed.has('read_file')).toBe(true)
     expect(allowed.has('write_file')).toBe(true)
     expect(allowed.has('execute')).toBe(true)
@@ -134,14 +150,14 @@ describe('Backend tools scoping', () => {
 
   it('passthrough disabled does not add backend tools', () => {
     const mw = makeMiddleware(false)
-    const allowed = mw._allowedToolNames('step_1')
+    const allowed = mwAllowedToolNames(mw, 'step_1')
     expect(allowed.has('read_file')).toBe(false)
     expect(allowed.has('write_file')).toBe(false)
   })
 
   it('passthrough combines with task tools', () => {
     const mw = makeMiddleware(true)
-    const allowed = mw._allowedToolNames('step_2')
+    const allowed = mwAllowedToolNames(mw, 'step_2')
     expect(allowed.has('tool_b')).toBe(true)
     expect(allowed.has('tool_a')).toBe(false) // belongs to step_1
     expect(allowed.has('ls')).toBe(true)
@@ -150,7 +166,7 @@ describe('Backend tools scoping', () => {
 
   it('passthrough works with no active task', () => {
     const mw = makeMiddleware(true)
-    const allowed = mw._allowedToolNames(null)
+    const allowed = mwAllowedToolNames(mw, null)
     expect(allowed.has('read_file')).toBe(true)
     expect(allowed.has('ls')).toBe(true)
     expect(allowed.has('tool_a')).toBe(false)
@@ -159,7 +175,7 @@ describe('Backend tools scoping', () => {
 
   it('custom backendTools used instead of defaults', () => {
     const mw = makeMiddleware(true, mockBackend, new Set(['custom_tool']))
-    const allowed = mw._allowedToolNames('step_1')
+    const allowed = mwAllowedToolNames(mw, 'step_1')
     expect(allowed.has('custom_tool')).toBe(true)
     expect(allowed.has('read_file')).toBe(false) // not in custom set
   })

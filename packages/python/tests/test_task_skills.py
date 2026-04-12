@@ -30,17 +30,17 @@ class TestSkillsInit:
     def test_task_skills_activates_without_backend(self):
         tasks = [Task(name="a", instruction="A", tools=[tool_a], skills=["s1"])]
         mw = TaskSteeringMiddleware(tasks=tasks)
-        assert mw._skills_active is True
+        assert mw._ctx.skills_active is True
 
     def test_no_skills_configured_inert(self):
         tasks = [Task(name="a", instruction="A", tools=[tool_a])]
         mw = TaskSteeringMiddleware(tasks=tasks)
-        assert mw._skills_active is False
+        assert mw._ctx.skills_active is False
 
     def test_global_skills_activates_without_backend(self):
         tasks = [Task(name="a", instruction="A", tools=[tool_a])]
         mw = TaskSteeringMiddleware(tasks=tasks, global_skills=["gs"])
-        assert mw._skills_active is True
+        assert mw._ctx.skills_active is True
 
     def test_task_skills_field_default_none(self):
         task = Task(name="a", instruction="A", tools=[tool_a])
@@ -85,13 +85,13 @@ class TestSkillScoping:
     def test_allowed_skill_names_no_active(self):
         tasks = [Task(name="a", instruction="A", tools=[tool_a], skills=["s1"])]
         mw = TaskSteeringMiddleware(tasks=tasks, global_skills=["gs"])
-        allowed = mw._allowed_skill_names(None)
+        allowed = mw._allowed_skill_names(mw._ctx, None)
         assert allowed == {"gs"}
 
     def test_allowed_skill_names_with_active(self):
         tasks = [Task(name="a", instruction="A", tools=[tool_a], skills=["s1", "s2"])]
         mw = TaskSteeringMiddleware(tasks=tasks, global_skills=["gs"])
-        allowed = mw._allowed_skill_names("a")
+        allowed = mw._allowed_skill_names(mw._ctx, "a")
         assert allowed == {"gs", "s1", "s2"}
 
     def test_allowed_skill_names_task_without_skills(self):
@@ -100,7 +100,7 @@ class TestSkillScoping:
             Task(name="b", instruction="B", tools=[tool_b]),
         ]
         mw = TaskSteeringMiddleware(tasks=tasks, global_skills=["gs"])
-        allowed = mw._allowed_skill_names("b")
+        allowed = mw._allowed_skill_names(mw._ctx, "b")
         assert allowed == {"gs"}
 
 
@@ -151,8 +151,8 @@ class TestSkillRendering:
     def test_renders_available_skills_section(self):
         mw = self._make_middleware()
         state = self._state_with_skills()
-        statuses = mw._get_statuses(state)
-        block = mw._render_status_block(statuses, active="research", state=state)
+        statuses = mw._get_statuses(mw._ctx, state)
+        block = mw._render_status_block(mw._ctx, statuses, "research", state=state)
         assert "<available_skills>" in block
         assert "web-research" in block
         assert "formatting" in block
@@ -164,15 +164,15 @@ class TestSkillRendering:
         tasks = [Task(name="a", instruction="A", tools=[tool_a])]
         mw = TaskSteeringMiddleware(tasks=tasks)
         statuses = {"a": "in_progress"}
-        block = mw._render_status_block(statuses, active="a", state={})
+        block = mw._render_status_block(mw._ctx, statuses, "a", state={})
         assert "<available_skills>" not in block
 
     def test_skills_filtered_to_active_task(self):
         mw = self._make_middleware()
         state = self._state_with_skills()
         state["task_statuses"] = {"research": "complete", "write": "in_progress"}
-        statuses = mw._get_statuses(state)
-        block = mw._render_status_block(statuses, active="write", state=state)
+        statuses = mw._get_statuses(mw._ctx, state)
+        block = mw._render_status_block(mw._ctx, statuses, "write", state=state)
         assert "<available_skills>" in block
         # write task has no skills, only global_skills
         assert "formatting" in block
@@ -181,14 +181,14 @@ class TestSkillRendering:
     def test_skill_instruction_in_rules(self):
         mw = self._make_middleware()
         state = self._state_with_skills()
-        statuses = mw._get_statuses(state)
-        block = mw._render_status_block(statuses, active="research", state=state)
+        statuses = mw._get_statuses(mw._ctx, state)
+        block = mw._render_status_block(mw._ctx, statuses, "research", state=state)
         assert "read its SKILL.md file" in block
 
     def test_no_skills_section_without_state(self):
         mw = self._make_middleware()
         statuses = {"research": "in_progress", "write": "pending"}
-        block = mw._render_status_block(statuses, active="research")
+        block = mw._render_status_block(mw._ctx, statuses, "research")
         assert "<available_skills>" not in block
 
     def test_warns_on_missing_skill_names(self, caplog):
@@ -205,22 +205,22 @@ class TestSkillRendering:
                 },
             ],
         }
-        statuses = mw._get_statuses(state)
+        statuses = mw._get_statuses(mw._ctx, state)
         with caplog.at_level(
             logging.WARNING, logger="langchain_task_steering.middleware"
         ):
-            mw._render_status_block(statuses, active="research", state=state)
+            mw._render_status_block(mw._ctx, statuses, "research", state=state)
         assert "web-research" in caplog.text
         assert "not found in skills_metadata" in caplog.text
 
     def test_no_warning_when_all_skills_present(self, caplog):
         mw = self._make_middleware()
         state = self._state_with_skills()
-        statuses = mw._get_statuses(state)
+        statuses = mw._get_statuses(mw._ctx, state)
         with caplog.at_level(
             logging.WARNING, logger="langchain_task_steering.middleware"
         ):
-            mw._render_status_block(statuses, active="research", state=state)
+            mw._render_status_block(mw._ctx, statuses, "research", state=state)
         assert "not found in skills_metadata" not in caplog.text
 
 
@@ -233,14 +233,14 @@ class TestSkillToolAutoWhitelist:
     def test_read_file_and_ls_auto_whitelisted(self):
         tasks = [Task(name="a", instruction="A", tools=[tool_a], skills=["s1"])]
         mw = TaskSteeringMiddleware(tasks=tasks)
-        allowed = mw._allowed_tool_names("a")
+        allowed = mw._allowed_tool_names(mw._ctx, "a")
         assert "read_file" in allowed
         assert "ls" in allowed
 
     def test_no_auto_whitelist_when_no_skills(self):
         tasks = [Task(name="a", instruction="A", tools=[tool_a])]
         mw = TaskSteeringMiddleware(tasks=tasks)
-        allowed = mw._allowed_tool_names("a")
+        allowed = mw._allowed_tool_names(mw._ctx, "a")
         assert "read_file" not in allowed
         assert "ls" not in allowed
 
@@ -251,7 +251,7 @@ class TestSkillToolAutoWhitelist:
             Task(name="b", instruction="B", tools=[tool_b]),
         ]
         mw = TaskSteeringMiddleware(tasks=tasks)
-        allowed = mw._allowed_tool_names("b")
+        allowed = mw._allowed_tool_names(mw._ctx, "b")
         assert "read_file" not in allowed
         assert "ls" not in allowed
 
@@ -262,7 +262,7 @@ class TestSkillToolAutoWhitelist:
             Task(name="b", instruction="B", tools=[tool_b]),
         ]
         mw = TaskSteeringMiddleware(tasks=tasks, global_skills=["gs"])
-        allowed = mw._allowed_tool_names("b")
+        allowed = mw._allowed_tool_names(mw._ctx, "b")
         assert "read_file" in allowed
         assert "ls" in allowed
 
@@ -272,7 +272,7 @@ class TestSkillToolAutoWhitelist:
             tasks=tasks,
             backend_tools_passthrough=False,
         )
-        allowed = mw._allowed_tool_names("a")
+        allowed = mw._allowed_tool_names(mw._ctx, "a")
         assert "read_file" in allowed
         assert "ls" in allowed
         assert "write_file" not in allowed
@@ -284,7 +284,7 @@ class TestSkillToolAutoWhitelist:
             tasks=tasks,
             backend_tools_passthrough=True,
         )
-        allowed = mw._allowed_tool_names("a")
+        allowed = mw._allowed_tool_names(mw._ctx, "a")
         assert "read_file" in allowed
         assert "ls" in allowed
         assert "write_file" in allowed
@@ -304,7 +304,7 @@ class TestSkillToolAutoWhitelist:
                 },
             ],
         }
-        allowed = mw._allowed_tool_names("a", state=state)
+        allowed = mw._allowed_tool_names(mw._ctx, "a", state=state)
         assert "web_search" in allowed
         assert "scrape_url" in allowed
 
@@ -331,11 +331,11 @@ class TestSkillToolAutoWhitelist:
                 },
             ],
         }
-        allowed_a = mw._allowed_tool_names("a", state=state)
+        allowed_a = mw._allowed_tool_names(mw._ctx, "a", state=state)
         assert "web_search" in allowed_a
         assert "code_exec" not in allowed_a
 
-        allowed_b = mw._allowed_tool_names("b", state=state)
+        allowed_b = mw._allowed_tool_names(mw._ctx, "b", state=state)
         assert "code_exec" in allowed_b
         assert "web_search" not in allowed_b
 
@@ -353,14 +353,14 @@ class TestSkillToolAutoWhitelist:
                 },
             ],
         }
-        allowed = mw._allowed_tool_names("a", state=state)
+        allowed = mw._allowed_tool_names(mw._ctx, "a", state=state)
         assert "format_doc" in allowed
 
     def test_skill_allowed_tools_without_state_is_noop(self):
         """Without state, allowed_tools cannot be resolved — no error."""
         tasks = [Task(name="a", instruction="A", tools=[tool_a], skills=["s1"])]
         mw = TaskSteeringMiddleware(tasks=tasks)
-        allowed = mw._allowed_tool_names("a")
+        allowed = mw._allowed_tool_names(mw._ctx, "a")
         # Only the hardcoded read_file/ls, not skill-specific tools
         assert "read_file" in allowed
         assert "web_search" not in allowed
@@ -374,7 +374,7 @@ class TestSkillToolAutoWhitelist:
                 {"name": "s1", "description": "Skill 1", "path": "/skills/s1/SKILL.md"},
             ],
         }
-        allowed = mw._allowed_tool_names("a", state=state)
+        allowed = mw._allowed_tool_names(mw._ctx, "a", state=state)
         assert "read_file" in allowed
         assert "ls" in allowed
 

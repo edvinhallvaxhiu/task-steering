@@ -321,7 +321,7 @@ class TestAdapterIntegration:
         tasks = [Task(name="a", instruction="A", tools=[tool_a], middleware=adapter)]
         mw = TaskSteeringMiddleware(tasks=tasks)
 
-        names = mw._allowed_tool_names(active_name="a")
+        names = mw._allowed_tool_names(mw._ctx, "a")
         assert "inner_tool" in names
         assert "tool_a" in names
 
