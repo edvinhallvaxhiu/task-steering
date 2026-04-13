@@ -598,10 +598,10 @@ export class TaskSteeringMiddleware {
       summary = cfg.content!
     } else {
       const invokeMessages = TaskSteeringMiddleware._buildSummaryMessages(task, cfg, taskMessages)
-      const response = (model as { invoke(msgs: unknown[]): { content: string } }).invoke(
-        invokeMessages
-      )
-      summary = response.content
+      const response = (
+        model as { invoke(msgs: unknown[]): { content: string | unknown[] } }
+      ).invoke(invokeMessages)
+      summary = TaskSteeringMiddleware._extractResponseText(response.content)
     }
 
     this._finalizeSummarization(result, state, taskName, cfg, removeOps, summary)
@@ -627,12 +627,28 @@ export class TaskSteeringMiddleware {
     } else {
       const invokeMessages = TaskSteeringMiddleware._buildSummaryMessages(task, cfg, taskMessages)
       const response = await (
-        model as { ainvoke(msgs: unknown[]): Promise<{ content: string }> }
+        model as { ainvoke(msgs: unknown[]): Promise<{ content: string | unknown[] }> }
       ).ainvoke(invokeMessages)
-      summary = response.content
+      summary = TaskSteeringMiddleware._extractResponseText(response.content)
     }
 
     this._finalizeSummarization(result, state, taskName, cfg, removeOps, summary)
+  }
+
+  /**
+   * Extract plain text from a model response content.
+   * Handles extended-thinking models that return an array of content blocks
+   * (e.g. reasoning_content + text blocks) instead of a plain string.
+   */
+  static _extractResponseText(content: string | unknown[]): string {
+    if (typeof content === 'string') return content
+    if (Array.isArray(content)) {
+      return (content as Array<Record<string, unknown>>)
+        .filter((b) => b.type === 'text')
+        .map((b) => b.text as string)
+        .join('\n')
+    }
+    return String(content)
   }
 
   /**

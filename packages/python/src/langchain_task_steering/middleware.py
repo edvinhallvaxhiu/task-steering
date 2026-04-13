@@ -1004,7 +1004,7 @@ class _TaskSteeringBase(AgentMiddleware[TaskSteeringState]):
         else:
             invoke_msgs = self._build_summary_messages(task, cfg, task_messages)
             response = model.invoke(invoke_msgs)
-            summary = response.content
+            summary = _TaskSteeringBase._extract_response_text(response.content)
 
         return self._finalize_summarization(
             result, state, task_name, cfg, remove_ops, summary
@@ -1025,11 +1025,28 @@ class _TaskSteeringBase(AgentMiddleware[TaskSteeringState]):
         else:
             invoke_msgs = self._build_summary_messages(task, cfg, task_messages)
             response = await model.ainvoke(invoke_msgs)
-            summary = response.content
+            summary = _TaskSteeringBase._extract_response_text(response.content)
 
         return self._finalize_summarization(
             result, state, task_name, cfg, remove_ops, summary
         )
+
+    @staticmethod
+    def _extract_response_text(content: "str | list") -> str:
+        """Extract plain text from a model response content.
+
+        Handles extended-thinking models that return a list of content blocks
+        (e.g. ``reasoning_content`` + ``text`` blocks) instead of a plain string.
+        """
+        if isinstance(content, str):
+            return content
+        if isinstance(content, list):
+            return "\n".join(
+                b["text"]
+                for b in content
+                if isinstance(b, dict) and b.get("type") == "text"
+            )
+        return str(content)
 
     @staticmethod
     def _flatten_for_summary(task_messages: list) -> list[HumanMessage | AIMessage]:
