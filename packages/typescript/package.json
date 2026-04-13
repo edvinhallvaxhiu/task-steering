@@ -1,6 +1,6 @@
 {
   "name": "langchain-task-steering",
-  "version": "0.1.6",
+  "version": "0.1.7",
   "description": "Implicit state machine middleware for LangChain.js agents. Ordered task pipelines with per-task tool scoping, prompt injection, and composable validation.",
   "main": "./dist/index.js",
   "module": "./dist/index.mjs",

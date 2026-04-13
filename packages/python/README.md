@@ -122,18 +122,18 @@ middleware = WorkflowSteeringMiddleware(
 
 The agent starts in freeform mode with its full toolset. When a request matches a workflow, it calls `activate_workflow("onboarding")` to enter the structured pipeline. Tool scoping, prompt injection, and task ordering kick in only while a workflow is active.
 
-See [Workflow Mode](../../docs/workflow-mode.md) for full documentation.
+See [Workflow Mode](https://github.com/edvinhallvaxhiu/langchain-task-steering/blob/main/docs/workflow-mode.md) for full documentation.
 
 ## Documentation
 
 | Topic | Description |
 |---|---|
-| [Task Mode](../../docs/task-mode.md) | Task lifecycle, hooks, tool scoping, required tasks, configuration |
-| [Workflow Mode](../../docs/workflow-mode.md) | Dynamic workflow activation, catalog, human-in-the-loop, deactivation |
-| [Task Middleware](../../docs/task-middleware.md) | TaskMiddleware hooks, validation, composition, persistent state |
-| [Summarization](../../docs/summarization.md) | Post-completion message compression (replace and summarize modes) |
-| [Skills](../../docs/skills.md) | Task-scoped skills from SKILL.md files |
-| [Backend Passthrough](../../docs/backend-passthrough.md) | Whitelisting backend tools through the filter |
+| [Task Mode](https://github.com/edvinhallvaxhiu/langchain-task-steering/blob/main/docs/task-mode.md) | Task lifecycle, hooks, tool scoping, required tasks, configuration |
+| [Workflow Mode](https://github.com/edvinhallvaxhiu/langchain-task-steering/blob/main/docs/workflow-mode.md) | Dynamic workflow activation, catalog, human-in-the-loop, deactivation |
+| [Task Middleware](https://github.com/edvinhallvaxhiu/langchain-task-steering/blob/main/docs/task-middleware.md) | TaskMiddleware hooks, validation, composition, persistent state |
+| [Summarization](https://github.com/edvinhallvaxhiu/langchain-task-steering/blob/main/docs/summarization.md) | Post-completion message compression (replace and summarize modes) |
+| [Skills](https://github.com/edvinhallvaxhiu/langchain-task-steering/blob/main/docs/skills.md) | Task-scoped skills from SKILL.md files |
+| [Backend Passthrough](https://github.com/edvinhallvaxhiu/langchain-task-steering/blob/main/docs/backend-passthrough.md) | Whitelisting backend tools through the filter |
 
 ## Development
 

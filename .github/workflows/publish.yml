@@ -94,4 +94,4 @@ jobs:
       - name: Publish to npm
         if: steps.check.outputs.exists == 'false'
         working-directory: packages/typescript
-        run: npm publish --access public
+        run: npm publish --access public --provenance
