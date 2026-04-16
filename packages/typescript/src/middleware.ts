@@ -16,6 +16,7 @@ import {
   type SkillMetadata,
   type Workflow,
   type ToolLike,
+  type SystemMessageLike,
   type ModelRequest,
   type ModelResponse,
   type ModelCallHandler,
@@ -297,10 +298,24 @@ export class TaskSteeringMiddleware {
     )
     const scoped = request.tools.filter((t) => allowedNames.has(t.name))
 
-    const modified = request.override({
+    const overrides: {
+      systemMessage: SystemMessageLike
+      tools: ToolLike[]
+      modelSettings?: Record<string, unknown>
+    } = {
       systemMessage: { content: newContent },
       tools: scoped,
-    })
+    }
+
+    const activeTask = activeName ? this._ctx.taskMap.get(activeName) : undefined
+    if (activeTask?.modelSettings) {
+      overrides.modelSettings = {
+        ...(request.modelSettings ?? {}),
+        ...activeTask.modelSettings,
+      }
+    }
+
+    const modified = request.override(overrides)
 
     return { modified, activeName }
   }
@@ -2267,10 +2282,24 @@ export class WorkflowSteeringMiddleware {
     )
     const scoped = request.tools.filter((t) => allowedNames.has(t.name))
 
-    const modified = request.override({
+    const overrides: {
+      systemMessage: SystemMessageLike
+      tools: ToolLike[]
+      modelSettings?: Record<string, unknown>
+    } = {
       systemMessage: { content: newContent },
       tools: scoped,
-    })
+    }
+
+    const activeTask = activeName ? ctx.taskMap.get(activeName) : undefined
+    if (activeTask?.modelSettings) {
+      overrides.modelSettings = {
+        ...(request.modelSettings ?? {}),
+        ...activeTask.modelSettings,
+      }
+    }
+
+    const modified = request.override(overrides)
 
     return { modified, activeName }
   }

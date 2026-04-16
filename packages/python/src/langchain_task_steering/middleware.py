@@ -991,10 +991,19 @@ class _TaskSteeringBase(AgentMiddleware[TaskSteeringState]):
         allowed_names = self._allowed_tool_names(ctx, active_name, state=request.state)
         scoped = [t for t in request.tools if t.name in allowed_names]
 
-        modified = request.override(
-            system_message=SystemMessage(content=new_content),
-            tools=scoped,
-        )
+        overrides: dict[str, Any] = {
+            "system_message": SystemMessage(content=new_content),
+            "tools": scoped,
+        }
+
+        active_task = ctx.task_map.get(active_name) if active_name else None
+        if active_task is not None and active_task.model_settings:
+            overrides["model_settings"] = {
+                **(request.model_settings or {}),
+                **active_task.model_settings,
+            }
+
+        modified = request.override(**overrides)
         return modified, active_name
 
     # ── Summarization helpers ───────────────────────────────

@@ -129,7 +129,12 @@ export interface ModelRequest {
   state: Record<string, unknown>
   systemMessage: SystemMessageLike
   tools: ToolLike[]
-  override(overrides: { systemMessage?: SystemMessageLike; tools?: ToolLike[] }): ModelRequest
+  modelSettings?: Record<string, unknown>
+  override(overrides: {
+    systemMessage?: SystemMessageLike
+    tools?: ToolLike[]
+    modelSettings?: Record<string, unknown>
+  }): ModelRequest
 }
 
 export type ModelResponse = unknown
@@ -302,6 +307,17 @@ export interface Task {
   skills?: string[]
   /** Optional post-completion summarization config. */
   summarize?: TaskSummarization
+  /**
+   * Per-task overrides for `ModelRequest.modelSettings`, applied only while
+   * this task is `IN_PROGRESS`. Shallow-merged on top of any settings
+   * already present on the request (task keys win). Forwarded as kwargs to
+   * the chat model's invoke call, so any kwarg the provider accepts is
+   * valid (e.g. `reasoning_effort` for OpenAI, `thinking` for Anthropic,
+   * `additional_model_request_fields` for Bedrock Converse). Provider-
+   * nested configs are replaced, not deep-merged — restate the full block
+   * if you need to change a leaf.
+   */
+  modelSettings?: Record<string, unknown>
 }
 
 /**

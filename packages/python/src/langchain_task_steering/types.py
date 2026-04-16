@@ -239,8 +239,18 @@ class Task:
             them (composed in order, first = outermost), or ``None``.
             Each can implement any ``AgentMiddleware`` hook plus
             ``validate_completion`` for completion gating.
+        skills: Skill names available when this task is IN_PROGRESS.
         summarize: Optional post-completion summarization config.
             See :class:`TaskSummarization`.
+        model_settings: Per-task overrides for ``ModelRequest.model_settings``,
+            applied only while this task is ``IN_PROGRESS``.  Shallow-merged
+            on top of any settings already present on the request (task keys
+            win).  Forwarded by LangChain as kwargs to the chat model's
+            ``invoke`` call, so any kwarg the provider accepts is valid
+            (e.g. ``reasoning_effort`` for OpenAI, ``thinking`` for
+            Anthropic, ``additional_model_request_fields`` for Bedrock
+            Converse).  Provider-nested configs are replaced, not deep-merged
+            — restate the full block if you need to change a leaf.
     """
 
     name: str
@@ -249,6 +259,7 @@ class Task:
     middleware: "TaskMiddleware | AgentMiddleware | list[TaskMiddleware | AgentMiddleware] | None" = None
     skills: list[str] | None = None
     summarize: "TaskSummarization | None" = None
+    model_settings: dict[str, Any] | None = None
 
 
 @dataclass

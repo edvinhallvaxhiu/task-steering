@@ -55,6 +55,7 @@ function mockModelRequest(opts: {
   state: Record<string, unknown>
   systemMessage: SystemMessageLike
   tools: ToolLike[]
+  modelSettings?: Record<string, unknown>
 }): ModelRequest {
   return {
     ...opts,
@@ -63,6 +64,7 @@ function mockModelRequest(opts: {
         state: opts.state,
         systemMessage: overrides.systemMessage ?? opts.systemMessage,
         tools: overrides.tools ?? opts.tools,
+        modelSettings: overrides.modelSettings ?? opts.modelSettings,
       })
     },
   }
@@ -596,6 +598,98 @@ describe('wrapModelCall', () => {
     const handler = vi.fn(() => ({}))
     mw.wrapModelCall(request, handler)
     expect(handler).toHaveBeenCalledOnce()
+  })
+
+  it("applies active task's modelSettings", () => {
+    const tasks: Task[] = [
+      {
+        name: 'plan',
+        instruction: 'Plan.',
+        tools: [toolA],
+        modelSettings: {
+          additional_model_request_fields: {
+            thinking: { type: 'adaptive' },
+            output_config: { effort: 'high' },
+          },
+        },
+      },
+      { name: 'exec', instruction: 'Execute.', tools: [toolB] },
+    ]
+    const mw = new TaskSteeringMiddleware({ tasks })
+    const request = mockModelRequest({
+      state: { taskStatuses: { plan: 'in_progress', exec: 'pending' } },
+      systemMessage: { content: 'Base' },
+      tools: mw.tools,
+    })
+
+    let captured: ModelRequest | null = null
+    mw.wrapModelCall(request, (r) => {
+      captured = r
+      return {}
+    })
+
+    expect(captured!.modelSettings).toEqual({
+      additional_model_request_fields: {
+        thinking: { type: 'adaptive' },
+        output_config: { effort: 'high' },
+      },
+    })
+  })
+
+  it('shallow-merges task modelSettings over existing request settings', () => {
+    const tasks: Task[] = [
+      {
+        name: 'plan',
+        instruction: 'Plan.',
+        tools: [toolA],
+        modelSettings: { reasoning_effort: 'high' },
+      },
+    ]
+    const mw = new TaskSteeringMiddleware({ tasks })
+    const request = mockModelRequest({
+      state: { taskStatuses: { plan: 'in_progress' } },
+      systemMessage: { content: 'Base' },
+      tools: mw.tools,
+      modelSettings: { temperature: 0.2, reasoning_effort: 'low' },
+    })
+
+    let captured: ModelRequest | null = null
+    mw.wrapModelCall(request, (r) => {
+      captured = r
+      return {}
+    })
+
+    expect(captured!.modelSettings).toEqual({
+      temperature: 0.2,
+      reasoning_effort: 'high',
+    })
+  })
+
+  it('does not apply modelSettings from a non-active task', () => {
+    const tasks: Task[] = [
+      {
+        name: 'plan',
+        instruction: 'Plan.',
+        tools: [toolA],
+        modelSettings: { reasoning_effort: 'high' },
+      },
+      { name: 'exec', instruction: 'Execute.', tools: [toolB] },
+    ]
+    const mw = new TaskSteeringMiddleware({ tasks })
+    const request = mockModelRequest({
+      state: { taskStatuses: { plan: 'complete', exec: 'in_progress' } },
+      systemMessage: { content: 'Base' },
+      tools: mw.tools,
+      modelSettings: { temperature: 0.2 },
+    })
+
+    let captured: ModelRequest | null = null
+    mw.wrapModelCall(request, (r) => {
+      captured = r
+      return {}
+    })
+
+    expect(captured!.modelSettings).toEqual({ temperature: 0.2 })
   })
 })
 

@@ -463,6 +463,88 @@ class TestWrapModelCall:
         middleware.wrap_model_call(request, handler)
         handler.assert_called_once()
 
+    def test_task_model_settings_applied_when_active(self):
+        tasks = [
+            Task(
+                name="plan",
+                instruction="Plan.",
+                tools=[tool_a],
+                model_settings={
+                    "additional_model_request_fields": {
+                        "thinking": {"type": "adaptive"},
+                        "output_config": {"effort": "high"},
+                    }
+                },
+            ),
+            Task(name="exec", instruction="Execute.", tools=[tool_b]),
+        ]
+        mw = TaskSteeringMiddleware(tasks=tasks)
+        request = MockModelRequest(
+            state={"task_statuses": {"plan": "in_progress", "exec": "pending"}},
+            system_message=MockSystemMessage("Base"),
+            tools=mw.tools,
+        )
+
+        captured = {}
+        mw.wrap_model_call(request, lambda r: captured.update(req=r) or MagicMock())
+
+        assert captured["req"].model_settings == {
+            "additional_model_request_fields": {
+                "thinking": {"type": "adaptive"},
+                "output_config": {"effort": "high"},
+            }
+        }
+
+    def test_task_model_settings_shallow_merged_over_existing(self):
+        tasks = [
+            Task(
+                name="plan",
+                instruction="Plan.",
+                tools=[tool_a],
+                model_settings={"reasoning_effort": "high"},
+            ),
+        ]
+        mw = TaskSteeringMiddleware(tasks=tasks)
+        request = MockModelRequest(
+            state={"task_statuses": {"plan": "in_progress"}},
+            system_message=MockSystemMessage("Base"),
+            tools=mw.tools,
+            model_settings={"temperature": 0.2, "reasoning_effort": "low"},
+        )
+
+        captured = {}
+        mw.wrap_model_call(request, lambda r: captured.update(req=r) or MagicMock())
+
+        # Task key wins; unrelated key preserved.
+        assert captured["req"].model_settings == {
+            "temperature": 0.2,
+            "reasoning_effort": "high",
+        }
+
+    def test_task_model_settings_not_applied_when_task_not_active(self):
+        tasks = [
+            Task(
+                name="plan",
+                instruction="Plan.",
+                tools=[tool_a],
+                model_settings={"reasoning_effort": "high"},
+            ),
+            Task(name="exec", instruction="Execute.", tools=[tool_b]),
+        ]
+        mw = TaskSteeringMiddleware(tasks=tasks)
+        # 'exec' is active, not 'plan' — plan's settings must not leak.
+        request = MockModelRequest(
+            state={"task_statuses": {"plan": "complete", "exec": "in_progress"}},
+            system_message=MockSystemMessage("Base"),
+            tools=mw.tools,
+            model_settings={"temperature": 0.2},
+        )
+
+        captured = {}
+        mw.wrap_model_call(request, lambda r: captured.update(req=r) or MagicMock())
+
+        assert captured["req"].model_settings == {"temperature": 0.2}
+
 
 # ════════════════════════════════════════════════════════════
 # wrap_tool_call — completion validation + delegation

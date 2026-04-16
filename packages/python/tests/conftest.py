@@ -69,6 +69,7 @@ class MockModelRequest:
     tools: list
     runtime: Any = None
     messages: list = field(default_factory=list)
+    model_settings: dict = field(default_factory=dict)
 
     def override(self, **kwargs):
         return MockModelRequest(
@@ -77,6 +78,7 @@ class MockModelRequest:
             tools=kwargs.get("tools", self.tools),
             runtime=kwargs.get("runtime", self.runtime),
             messages=kwargs.get("messages", self.messages),
+            model_settings=kwargs.get("model_settings", self.model_settings),
         )
 
 

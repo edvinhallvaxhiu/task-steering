@@ -91,6 +91,7 @@ The nudge mechanism uses the `after_agent` hook with `jump_to: "model"` to re-en
 | `middleware` | no | Scoped middleware — a `TaskMiddleware`, `AgentMiddleware` (auto-wrapped), or a list of them. Only active during this task. |
 | `skills` | no | Skill names available when this task is `IN_PROGRESS`. Skill metadata comes from state (loaded by `SkillsMiddleware`). |
 | `summarize` | no | Post-completion summarization config. See [Task summarization](summarization.md). |
+| `model_settings` | no | Dict of kwargs shallow-merged into `ModelRequest.model_settings` (and forwarded to the chat model's `invoke`) while this task is `IN_PROGRESS`. Use for per-task reasoning/thinking/effort overrides. Provider-nested configs (e.g. Bedrock `additional_model_request_fields`) are replaced, not deep-merged. |
 
 ## Async support
 
