@@ -9,7 +9,7 @@ from langchain.agents.middleware import AgentMiddleware
 from typing_extensions import NotRequired, TypedDict
 
 # Sentinel: "all tasks are required". Uses identity (`is`) comparison.
-_REQUIRE_ALL = ("*",)
+_REQUIRE_ALL: tuple[str, ...] = ("*",)
 
 
 class TaskStatus(str, Enum):
@@ -283,5 +283,5 @@ class Workflow:
     global_tools: list = field(default_factory=list)
     global_skills: list[str] | None = None
     enforce_order: bool = True
-    required_tasks: list[str] | None = _REQUIRE_ALL
+    required_tasks: list[str] | tuple[str, ...] | None = _REQUIRE_ALL
     allow_deactivate_in_progress: bool = False

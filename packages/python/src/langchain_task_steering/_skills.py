@@ -81,8 +81,8 @@ def parse_skill_frontmatter(content: str, path: str) -> SkillMetadata | None:
     else:
         allowed_tools = []
 
-    license_str = str(data.get("license", "")).strip() or None
-    compat_str = str(data.get("compatibility", "")).strip() or None
+    license_str = str(data.get("license") or "").strip() or None
+    compat_str = str(data.get("compatibility") or "").strip() or None
 
     raw_metadata = data.get("metadata", {})
     metadata_dict: dict[str, str] = {}

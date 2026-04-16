@@ -115,6 +115,12 @@ export class TaskSteeringMiddleware {
   private _backendToolsPassthrough: boolean
   private readonly _backendTools: ReadonlySet<string>
 
+  /**
+   * Skill names already warned about — keeps the per-render warning
+   * from spamming logs every model call.
+   */
+  private readonly _warnedMissingSkills: Set<string> = new Set()
+
   /** All tools registered by this middleware. */
   readonly tools: ToolLike[]
 
@@ -261,7 +267,14 @@ export class TaskSteeringMiddleware {
     const statuses = getStatuses(this._ctx, request.state as TaskSteeringState)
     const activeName = getActiveTask(this._ctx, statuses)
 
-    const block = renderStatusBlock(this._ctx, statuses, activeName, request.state)
+    const block = renderStatusBlock(
+      this._ctx,
+      statuses,
+      activeName,
+      request.state,
+      undefined,
+      this._warnedMissingSkills
+    )
     let existingBlocks = request.systemMessage ? getContentBlocks(request.systemMessage) : []
 
     // Strip SkillsMiddleware's global prompt injection — we replace it with
@@ -882,6 +895,11 @@ function msgRole(m: unknown): string | undefined {
  * Always records (not just when summarization is configured) so the
  * abort-commitment check can detect tool calls made during the task.
  * Mutates `result.update` in place.
+ *
+ * `startIndex` points past every message already in `state` plus every
+ * message the transition CommandResult will append (the transition tool
+ * message and any messages returned by `onStart`), so the first "task
+ * message" lands at this index.
  */
 function recordTaskStart(
   result: CommandResult,
@@ -889,8 +907,9 @@ function recordTaskStart(
   taskName: string
 ): void {
   const messages = (state.messages as unknown[]) ?? []
-  const startIndex = messages.length + 1
   const update = result.update
+  const pendingMsgs = (update.messages as unknown[] | undefined) ?? []
+  const startIndex = messages.length + pendingMsgs.length
   const starts: Record<string, number> = {
     ...((state.taskMessageStarts as Record<string, number>) ?? {}),
   }
@@ -1234,7 +1253,8 @@ function renderStatusBlock(
   statuses: Record<string, string>,
   active: string | null,
   state?: Record<string, unknown>,
-  backendToolsPassthrough?: boolean
+  backendToolsPassthrough?: boolean,
+  warnedMissingSkills?: Set<string>
 ): string {
   const lines: string[] =
     ctx.label != null ? [`\n<task_pipeline workflow="${ctx.label}">`] : ['\n<task_pipeline>']
@@ -1275,12 +1295,18 @@ function renderStatusBlock(
     if (ctx.label == null) {
       const availableNames = new Set(allSkills.map((s) => s.name))
       const missing = [...allowedNames].filter((n) => !availableNames.has(n))
-      if (missing.length > 0) {
+      const newMissing = warnedMissingSkills
+        ? missing.filter((n) => !warnedMissingSkills.has(n))
+        : missing
+      if (newMissing.length > 0) {
         console.warn(
-          `[langchain-task-steering] Skill(s) ${missing.sort().join(', ')} referenced by ` +
+          `[langchain-task-steering] Skill(s) ${newMissing.sort().join(', ')} referenced by ` +
             `task/global config but not found in skillsMetadata state. Check skill names ` +
             `and ensure skills are loaded (e.g. via SkillsMiddleware).`
         )
+        if (warnedMissingSkills) {
+          for (const n of newMissing) warnedMissingSkills.add(n)
+        }
       }
     }
 
@@ -1528,6 +1554,11 @@ function executeTaskTransition(
 
     statuses[task] = TaskStatus.ABORTED
 
+    const newStarts: Record<string, number> = {
+      ...((state.taskMessageStarts as Record<string, number>) ?? {}),
+    }
+    delete newStarts[task]
+
     const display = Object.entries(statuses)
       .map(([k, v]) => `  ${k}: ${v}`)
       .join('\n')
@@ -1535,6 +1566,7 @@ function executeTaskTransition(
     return {
       update: {
         taskStatuses: statuses,
+        taskMessageStarts: newStarts,
         nudgeCount: 0,
         messages: [
           {
@@ -2133,14 +2165,14 @@ export class WorkflowSteeringMiddleware {
     }
 
     const wf = this._workflowMap.get(wfName)
-    if (!wf) {
+    const ctx = this._workflowCtxs.get(wfName)
+    if (!wf || !ctx) {
       return {
         content: `Active workflow '${wfName}' not found.`,
         toolCallId,
       }
     }
 
-    const ctx = this._workflowCtxs.get(wfName)!
     return executeTaskTransition(
       args.task,
       args.status,

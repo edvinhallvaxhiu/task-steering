@@ -267,7 +267,7 @@ def _find_dupes(names: list[str]) -> set[str]:
 
 
 def _resolve_required_tasks(
-    required_tasks: list[str] | None,
+    required_tasks: list[str] | tuple[str, ...] | None,
     all_task_names: set[str],
     context_label: str = "",
 ) -> set[str]:
@@ -405,6 +405,9 @@ class _TaskSteeringBase(AgentMiddleware[TaskSteeringState]):
             else self.DEFAULT_BACKEND_TOOLS
         )
         self._backend_tools_passthrough = backend_tools_passthrough
+        # Skill names already warned about — keeps the per-render warning
+        # from spamming logs every model call.
+        self._warned_missing_skills: set[str] = set()
 
     # ── Abstract-ish methods for subclasses ──────────────────
 
@@ -412,9 +415,9 @@ class _TaskSteeringBase(AgentMiddleware[TaskSteeringState]):
         """Return the pipeline context for the current state, or None."""
         raise NotImplementedError
 
-    def _extra_allowed_tool_names(self) -> set[str]:
+    def _extra_allowed_tool_names(self) -> frozenset[str]:
         """Extra tool names to add to allowed set when pipeline is active."""
-        return set()
+        return frozenset()
 
     def _on_no_pipeline_model_call(
         self,
@@ -615,13 +618,15 @@ class _TaskSteeringBase(AgentMiddleware[TaskSteeringState]):
             if ctx.label is None:
                 available_names = {s["name"] for s in all_skills}
                 missing = allowed_names - available_names
-                if missing:
+                new_missing = missing - self._warned_missing_skills
+                if new_missing:
                     logger.warning(
                         "Skill(s) %s referenced by task/global config but not found "
                         "in skills_metadata state. Check skill names and ensure "
                         "skills are loaded (e.g. via SkillsMiddleware).",
-                        ", ".join(sorted(missing)),
+                        ", ".join(sorted(new_missing)),
                     )
+                    self._warned_missing_skills.update(new_missing)
 
             if visible_skills:
                 has_visible_skills = True
@@ -808,8 +813,8 @@ class _TaskSteeringBase(AgentMiddleware[TaskSteeringState]):
             if isinstance(updates, AbortAll):
                 return self._apply_abort_all(result, task_name, updates, ctx)
 
-            merged = _merge_hook_updates(dict(result.update), updates)
-            if merged is not None and merged is not result.update:
+            if updates:
+                merged = _merge_hook_updates(dict(result.update), updates)
                 result = Command(update=merged)
 
         if target == TaskStatus.IN_PROGRESS.value:
@@ -853,8 +858,8 @@ class _TaskSteeringBase(AgentMiddleware[TaskSteeringState]):
             if isinstance(updates, AbortAll):
                 return self._apply_abort_all(result, task_name, updates, ctx)
 
-            merged = _merge_hook_updates(dict(result.update), updates)
-            if merged is not None and merged is not result.update:
+            if updates:
+                merged = _merge_hook_updates(dict(result.update), updates)
                 result = Command(update=merged)
 
         if target == TaskStatus.IN_PROGRESS.value:
@@ -917,9 +922,8 @@ class _TaskSteeringBase(AgentMiddleware[TaskSteeringState]):
 
         for i, msg in enumerate(existing_msgs):
             if isinstance(msg, ToolMessage):
-                existing_msgs[i] = ToolMessage(
-                    content=f"{msg.content}{note}",
-                    tool_call_id=msg.tool_call_id,
+                existing_msgs[i] = msg.model_copy(
+                    update={"content": f"{msg.content}{note}"}
                 )
                 break
         else:
@@ -1004,9 +1008,15 @@ class _TaskSteeringBase(AgentMiddleware[TaskSteeringState]):
         Always records (not just when summarization is configured) so the
         abort-commitment check can detect whether any tool calls were made
         during the task's in_progress window.
+
+        ``start_index`` points past every message already in ``state`` plus
+        every message the transition ``Command`` will append (the
+        transition ``ToolMessage`` and any messages returned by
+        ``on_start``), so the first "task message" lands at this index.
         """
-        start_index = len(state.get("messages", [])) + 1
         update = dict(result.update) if result.update else {}
+        pending_msgs = update.get("messages") or []
+        start_index = len(state.get("messages", [])) + len(pending_msgs)
         starts = dict(state.get("task_message_starts") or {})
         starts[task_name] = start_index
         update["task_message_starts"] = starts
@@ -1078,9 +1088,8 @@ class _TaskSteeringBase(AgentMiddleware[TaskSteeringState]):
 
         for i, msg in enumerate(existing_msgs):
             if isinstance(msg, ToolMessage):
-                existing_msgs[i] = ToolMessage(
-                    content=f"{msg.content}\n\nTask summary:\n{summary}",
-                    tool_call_id=msg.tool_call_id,
+                existing_msgs[i] = msg.model_copy(
+                    update={"content": f"{msg.content}\n\nTask summary:\n{summary}"}
                 )
                 break
 
@@ -1299,10 +1308,14 @@ class _TaskSteeringBase(AgentMiddleware[TaskSteeringState]):
 
             statuses[task] = TaskStatus.ABORTED.value
 
+            starts = dict(state.get("task_message_starts") or {})
+            starts.pop(task, None)
+
             display = "\n".join(f"  {k}: {v}" for k, v in statuses.items())
             return Command(
                 update={
                     "task_statuses": statuses,
+                    "task_message_starts": starts,
                     "nudge_count": 0,
                     "messages": [
                         ToolMessage(
@@ -1570,7 +1583,7 @@ class TaskSteeringMiddleware(_TaskSteeringBase):
         *,
         global_tools: list | None = None,
         enforce_order: bool = True,
-        required_tasks: list[str] | None = _REQUIRE_ALL,
+        required_tasks: list[str] | tuple[str, ...] | None = _REQUIRE_ALL,
         max_nudges: int = 3,
         backend_tools_passthrough: bool = False,
         backend_tools: set[str] | None = None,
@@ -1816,10 +1829,9 @@ class WorkflowSteeringMiddleware(_TaskSteeringBase):
         allowed = {_ACTIVATE_TOOL_NAME}
         scoped = [t for t in request.tools if t.name in allowed]
         for t in request.tools:
-            if t.name not in self._workflow_tool_names or t.name == _ACTIVATE_TOOL_NAME:
-                if t.name not in allowed:
-                    scoped.append(t)
-                    allowed.add(t.name)
+            if t.name not in self._workflow_tool_names and t.name not in allowed:
+                scoped.append(t)
+                allowed.add(t.name)
 
         return request.override(
             system_message=SystemMessage(content=new_content),
@@ -2019,10 +2031,10 @@ class WorkflowSteeringMiddleware(_TaskSteeringBase):
                 return "No workflow is active. Activate a workflow first."
 
             wf = workflow_map.get(wf_name)
-            if wf is None:
+            ctx = workflow_ctxs.get(wf_name)
+            if wf is None or ctx is None:
                 return f"Active workflow '{wf_name}' not found."
 
-            ctx = workflow_ctxs[wf_name]
             return execute(
                 task,
                 status,
