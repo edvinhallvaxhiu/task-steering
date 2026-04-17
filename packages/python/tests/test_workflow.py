@@ -1098,3 +1098,58 @@ class TestBackwardCompatibility:
         assert _TRANSITION_TOOL_NAME in names
         assert _ACTIVATE_TOOL_NAME not in names
         assert _DEACTIVATE_TOOL_NAME not in names
+
+
+# ════════════════════════════════════════════════════════════
+# Catalog view via wrap_model_call (sync + async)
+# ════════════════════════════════════════════════════════════
+
+
+class TestWorkflowCatalogModelCall:
+    def _build_request(self, state, tools):
+        return MockModelRequest(
+            state=state,
+            system_message=MockSystemMessage("Base."),
+            tools=tools,
+        )
+
+    def test_wrap_model_call_injects_catalog_when_no_workflow(self, wf_middleware):
+        """With no active workflow, wrap_model_call should route through catalog."""
+        seen: dict = {}
+
+        def handler(request):
+            seen["tools"] = {t.name for t in request.tools}
+            seen["system"] = request.system_message
+            return MagicMock()
+
+        request = self._build_request(
+            {"active_workflow": None, "messages": []},
+            wf_middleware.tools,
+        )
+        wf_middleware.wrap_model_call(request, handler)
+
+        # Catalog scoping: activate is present, deactivate/transition are not
+        assert _ACTIVATE_TOOL_NAME in seen["tools"]
+        assert _DEACTIVATE_TOOL_NAME not in seen["tools"]
+        assert _TRANSITION_TOOL_NAME not in seen["tools"]
+
+    @pytest.mark.asyncio
+    async def test_awrap_model_call_injects_catalog_when_no_workflow(
+        self, wf_middleware
+    ):
+        """Async version of catalog injection."""
+        seen: dict = {}
+
+        async def async_handler(request):
+            seen["tools"] = {t.name for t in request.tools}
+            return MagicMock()
+
+        request = self._build_request(
+            {"active_workflow": None, "messages": []},
+            wf_middleware.tools,
+        )
+        await wf_middleware.awrap_model_call(request, async_handler)
+
+        assert _ACTIVATE_TOOL_NAME in seen["tools"]
+        assert _DEACTIVATE_TOOL_NAME not in seen["tools"]
+        assert _TRANSITION_TOOL_NAME not in seen["tools"]

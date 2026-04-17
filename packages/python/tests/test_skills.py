@@ -224,3 +224,39 @@ class TestLoadSkills:
         )
         result = load_skills_from_backend(backend, ["/s/"])
         assert result == []
+
+    def test_download_files_exception_logs_and_skips(self, caplog):
+        """A backend that raises from download_files is logged and that source is skipped."""
+        import logging
+
+        class RaisingDownloadBackend:
+            def ls(self, path):
+                return MockLsResult([{"path": "/s/x", "is_dir": True}])
+
+            def download_files(self, paths):
+                raise RuntimeError("network down")
+
+        with caplog.at_level(logging.WARNING, logger="langchain_task_steering._skills"):
+            result = load_skills_from_backend(RaisingDownloadBackend(), ["/s/"])
+
+        assert result == []
+        assert any("Failed to download SKILL.md" in rec.message for rec in caplog.records)
+
+    def test_handles_unicode_decode_error(self, caplog):
+        """A non-utf8 SKILL.md body is logged and skipped without crashing."""
+        import logging
+
+        # Invalid UTF-8 byte sequence (lone continuation byte).
+        bad_bytes = b"\x80\xff\xfe"
+        backend = MockBackend(
+            ls_results={"/s/": [{"path": "/s/x", "is_dir": True}]},
+            download_responses={
+                "/s/x/SKILL.md": MockDownloadResponse(content=bad_bytes),
+            },
+        )
+
+        with caplog.at_level(logging.WARNING, logger="langchain_task_steering._skills"):
+            result = load_skills_from_backend(backend, ["/s/"])
+
+        assert result == []
+        assert any("Error decoding" in rec.message for rec in caplog.records)
